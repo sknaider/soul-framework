@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import struct
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from soul_framework.backend.base import BackendBase
@@ -84,12 +84,13 @@ class SleepGate:
 
     async def _phase_replay(self, dry_run: bool, boost: float) -> PhaseResult:
         """Phase 1 REPLAY: boost relevance for memories activated in last 24h."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         rows = await self._db.fetchall(
             """SELECT id, relevance_score FROM memories
                WHERE agent = $1 AND invalid_at IS NULL
                AND last_activation IS NOT NULL
-               AND last_activation > datetime('now', '-1 day')""",
-            self._agent,
+               AND last_activation > $2""",
+            self._agent, cutoff,
         )
 
         if not dry_run:
@@ -114,14 +115,14 @@ class SleepGate:
 
         Emotional resistance: high valence/arousal memories resist forgetting.
         """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
         rows = await self._db.fetchall(
             """SELECT id, relevance_score, valence, arousal, utility_score
                FROM memories
                WHERE agent = $1 AND invalid_at IS NULL
                AND importance <= 7
-               AND (last_activation IS NULL
-                    OR last_activation < datetime('now', $2))""",
-            self._agent, f"-{stale_days} day",
+               AND (last_activation IS NULL OR last_activation < $2)""",
+            self._agent, cutoff,
         )
 
         affected = 0

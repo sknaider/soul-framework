@@ -1,6 +1,6 @@
 """SEAL SOUL — Scoring helpers.
 
-Exact copy from proyecto-seal/memory/soul/core/scoring.py.
+Adapted from Team SEAL internals for the public SOUL Framework API.
 Used by: MemoryStore.search() for ranking results.
 
 Includes:

@@ -103,19 +103,25 @@ class ProceduralStore:
         vec = await self._emb.embed(embed_text)
         emb_bytes = _pack_embedding(vec)
 
-        row = await self._db.fetchone(
-            """INSERT INTO procedural_memories
-               (agent, task_type, task_description, workflow, facts, embedding,
-                hit_count, success_count, fail_count, source_task, build_policy,
-                created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-               RETURNING id""",
+        values = (
             self._agent, task_type, task_description, workflow, facts,
             emb_bytes, 0, 1 if success else 0, 0 if success else 1,
             source_task, "direct", now, now,
         )
-
-        proc_id = row["id"] if row else 0
+        atomic_insert = getattr(self._db, "insert_procedure_with_vector", None)
+        if callable(atomic_insert):
+            proc_id = await atomic_insert(values, vec)
+        else:
+            row = await self._db.fetchone(
+                """INSERT INTO procedural_memories
+                   (agent, task_type, task_description, workflow, facts, embedding,
+                    hit_count, success_count, fail_count, source_task, build_policy,
+                    created_at, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                   RETURNING id""",
+                *values,
+            )
+            proc_id = row["id"] if row else 0
 
         # Update trie
         if self._trie is not None and self._trie_loaded:
@@ -161,28 +167,37 @@ class ProceduralStore:
         # Tier 2: Semantic vector search
         query_vec = await self._emb.embed(query)
 
-        conditions = ["agent = $1"]
-        params: list[Any] = [self._agent]
-        idx = 2
-        if task_type:
-            conditions.append(f"task_type = ${idx}")
-            params.append(task_type)
-            idx += 1
-
-        where = " AND ".join(conditions)
-        rows = await self._db.fetchall(
-            f"SELECT * FROM procedural_memories WHERE {where}",
-            *params,
-        )
+        vector_search = getattr(self._db, "search_procedure_vectors", None)
+        if callable(vector_search):
+            rows = await vector_search(
+                self._agent, query_vec, task_type=task_type, limit=max(top_k * 10, 100)
+            )
+        else:
+            conditions = ["agent = $1"]
+            params: list[Any] = [self._agent]
+            idx = 2
+            if task_type:
+                conditions.append(f"task_type = ${idx}")
+                params.append(task_type)
+                idx += 1
+            rows = await self._db.fetchall(
+                f"SELECT * FROM procedural_memories WHERE {' AND '.join(conditions)}",
+                *params,
+            )
 
         for row in rows:
             if row["id"] in seen_ids:
                 continue
-            emb_data = row.get("embedding")
-            if not emb_data:
-                continue
-            mem_vec = _unpack_embedding(emb_data)
-            sim = cosine_similarity(query_vec, mem_vec)
+            if "_vector_similarity" in row:
+                sim = float(row["_vector_similarity"])
+            else:
+                emb_data = row.get("embedding")
+                if not emb_data:
+                    continue
+                if isinstance(emb_data, memoryview):
+                    emb_data = emb_data.tobytes()
+                mem_vec = _unpack_embedding(emb_data)
+                sim = cosine_similarity(query_vec, mem_vec)
 
             proc = _row_to_procedure(row)
             results.append(ProcedureSearchResult(

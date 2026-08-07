@@ -29,24 +29,18 @@ class RuleManager:
     ) -> int:
         """Create or update a rule. Returns rule ID."""
         now = _now_iso()
-        existing = await self._db.fetchone(
-            "SELECT id FROM rules WHERE agent = $1 AND rule_key = $2",
-            self._agent, rule_key,
+        row = await self._db.fetchone(
+            """INSERT INTO rules (agent, rule_key, content, set_by, priority, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT(agent, rule_key) DO UPDATE SET
+                 content = excluded.content,
+                 priority = excluded.priority,
+                 set_by = excluded.set_by,
+                 active = 1
+               RETURNING id""",
+            self._agent, rule_key, content, set_by, priority, now,
         )
-        if existing:
-            await self._db.execute(
-                """UPDATE rules SET content = $1, priority = $2, set_by = $3, active = 1
-                   WHERE agent = $4 AND rule_key = $5""",
-                content, priority, set_by, self._agent, rule_key,
-            )
-            return existing["id"]
-        else:
-            row = await self._db.fetchone(
-                """INSERT INTO rules (agent, rule_key, content, set_by, priority, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-                self._agent, rule_key, content, set_by, priority, now,
-            )
-            return row["id"] if row else 0
+        return row["id"] if row else 0
 
     async def list(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
         """List all rules for this agent."""

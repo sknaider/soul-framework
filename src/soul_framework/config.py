@@ -9,9 +9,13 @@ from dataclasses import dataclass, field
 class SoulConfig:
     """Configuration for a Soul instance."""
 
-    # Backend (v0.2: sqlite only — zero-config)
-    backend: str = "sqlite"  # "sqlite"
+    # Backend (SQLite is zero-config; PostgreSQL requires the ``postgres`` extra)
+    backend: str = "sqlite"  # "sqlite" | "postgres"
     backend_url: str = ""  # empty = in-memory SQLite; or "path/to/soul.db"
+    postgres_schema: str = "soul_framework"
+    postgres_auto_migrate: bool = True
+    postgres_pool_min_size: int = 1
+    postgres_pool_max_size: int = 10
 
     # Embedding
     embedding_provider: str = "simple"  # "simple" | "sentence-transformer"
@@ -27,4 +31,5 @@ class SoulConfig:
 
     # Memory search
     memory_search_default_limit: int = 10
+    memory_search_candidate_limit: int = 100
     memory_vector_cache: bool = True  # cache embeddings in memory for SQLite search

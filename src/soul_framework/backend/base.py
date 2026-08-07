@@ -7,7 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class BackendBase(Protocol):
-    """Abstract storage backend. Implementations: SQLite (v0.2)."""
+    """Abstract storage backend. Implementations: SQLite and PostgreSQL."""
 
     async def initialize(self) -> None:
         """Create tables if not exist, run migrations."""

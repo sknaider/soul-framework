@@ -38,9 +38,46 @@ soul snapshot Maya                                # compact view of the soul's s
 ```bash
 pip install soul-framework              # base: identity + memory + boot + reflect, SQLite, zero config
 pip install soul-framework[embeddings]  # add TRUE semantic memory search (sentence-transformers)
+pip install soul-framework[postgres]    # add PostgreSQL + indexed pgvector storage
 ```
 
 No database to set up — SQLite by default.
+
+### PostgreSQL + pgvector
+
+For a larger persistent store, install both production extras and pass the DSN
+at runtime (never commit it):
+
+```bash
+pip install 'soul-framework[postgres,embeddings]'
+```
+
+```python
+import os
+from soul_framework import Soul
+from soul_framework.config import SoulConfig
+
+config = SoulConfig(
+    backend="postgres",
+    backend_url=os.environ["SOUL_POSTGRES_DSN"],
+    embedding_provider="sentence-transformer",
+)
+
+async with Soul.create("Maya", config=config) as agent:
+    await agent.memory.store("The user enjoys astronomy")
+    matches = await agent.memory.search("favorite stargazing hobby")
+```
+
+The database administrator must enable `CREATE EXTENSION vector` once. SOUL
+then applies an idempotent schema migration and uses a cosine HNSW index. The
+embedding model defines meaning: pgvector scales retrieval, while the default
+`simple` provider remains lexical by design. At scale, PostgreSQL first takes
+the nearest `memory_search_candidate_limit` vectors and then applies SOUL's
+importance/recency scoring; raise that limit when those secondary signals must
+consider a wider candidate set.
+
+The `soul` CLI intentionally remains the zero-config SQLite path in v0.3.0;
+PostgreSQL is configured through the Python API shown above.
 
 ## What you get
 
@@ -51,7 +88,7 @@ No database to set up — SQLite by default.
 
 ### A note on memory search (honest by design)
 
-- The **base install** ranks memories with **lexical (TF-IDF) matching** — zero downloads.
+- The **base install** ranks memories with **lexical token-hash matching** — zero downloads.
   It's strong when the query shares words with the memory (e.g. `"short answers"` → high),
   but a purely *semantic* query with no shared words (e.g. `"what does the user like?"`)
   scores near **0.00**. It's word-overlap search, not meaning search.
@@ -83,7 +120,7 @@ remember who it is and what it learned?*
 
 ## Status
 
-Alpha (v0.2.0) — extracted from Team SEAL's production system. API may still shift before 1.0.
+Alpha (v0.3.0) — SQLite Core plus optional PostgreSQL/pgvector scale path. API may still shift before 1.0.
 
 ## License
 

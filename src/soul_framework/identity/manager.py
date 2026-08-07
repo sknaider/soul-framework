@@ -40,39 +40,26 @@ class IdentityManager:
 
     async def set_personality(self, fields: dict[str, Any]) -> None:
         """Set or update identity fields (personality, philosophy, boot_context)."""
-        existing = await self.get()
         now = _now_iso()
-
-        if existing:
-            sets: list[str] = []
-            params: list[Any] = []
-            idx = 1
-            for key in ("personality", "philosophy", "boot_context"):
-                if key in fields:
-                    sets.append(f"{key} = ${idx}")
-                    params.append(fields[key])
-                    idx += 1
-            if sets:
-                sets.append(f"updated_at = ${idx}")
-                params.append(now)
-                idx += 1
-                params.append(self._agent)
-                sets_sql = ", ".join(sets)
-                await self._db.execute(
-                    f"UPDATE identity SET {sets_sql} WHERE agent = ${idx}",
-                    *params,
-                )
-        else:
-            await self._db.execute(
-                """INSERT INTO identity (agent, personality, philosophy, boot_context, ocean_scores, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                self._agent,
-                fields.get("personality", ""),
-                fields.get("philosophy", ""),
-                fields.get("boot_context", ""),
-                "{}",
-                now,
-            )
+        await self._db.execute(
+            """INSERT INTO identity
+               (agent, personality, philosophy, boot_context, ocean_scores, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT(agent) DO UPDATE SET
+                 personality = CASE WHEN $7 THEN excluded.personality ELSE identity.personality END,
+                 philosophy = CASE WHEN $8 THEN excluded.philosophy ELSE identity.philosophy END,
+                 boot_context = CASE WHEN $9 THEN excluded.boot_context ELSE identity.boot_context END,
+                 updated_at = excluded.updated_at""",
+            self._agent,
+            fields.get("personality", ""),
+            fields.get("philosophy", ""),
+            fields.get("boot_context", ""),
+            "{}",
+            now,
+            "personality" in fields,
+            "philosophy" in fields,
+            "boot_context" in fields,
+        )
 
     async def get_ocean(self) -> dict[str, float] | None:
         """Get OCEAN scores as dict {O, C, E, A, N}."""
@@ -99,20 +86,14 @@ class IdentityManager:
         ocean_json = json.dumps(scores)
         now = _now_iso()
 
-        existing = await self._db.fetchone(
-            "SELECT agent FROM identity WHERE agent = $1", self._agent
+        await self._db.execute(
+            """INSERT INTO identity (agent, ocean_scores, updated_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(agent) DO UPDATE SET
+                 ocean_scores = excluded.ocean_scores,
+                 updated_at = excluded.updated_at""",
+            self._agent, ocean_json, now,
         )
-        if existing:
-            await self._db.execute(
-                "UPDATE identity SET ocean_scores = $1, updated_at = $2 WHERE agent = $3",
-                ocean_json, now, self._agent,
-            )
-        else:
-            await self._db.execute(
-                """INSERT INTO identity (agent, ocean_scores, updated_at)
-                   VALUES ($1, $2, $3)""",
-                self._agent, ocean_json, now,
-            )
 
     async def update_ocean(
         self, deltas: dict[str, float], *, cap: float | None = None
@@ -148,20 +129,14 @@ class IdentityManager:
     ) -> None:
         """Create or update a relationship."""
         now = _now_iso()
-        existing = await self._db.fetchone(
-            "SELECT id FROM relationships WHERE agent = $1 AND person = $2",
-            self._agent, person,
+        await self._db.execute(
+            """INSERT INTO relationships
+               (agent, person, trust_level, style, dynamic, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT(agent, person) DO UPDATE SET
+                 trust_level = excluded.trust_level,
+                 style = excluded.style,
+                 dynamic = excluded.dynamic,
+                 updated_at = excluded.updated_at""",
+            self._agent, person, trust_level, style, dynamic, now,
         )
-        if existing:
-            await self._db.execute(
-                """UPDATE relationships
-                   SET trust_level = $1, style = $2, dynamic = $3, updated_at = $4
-                   WHERE agent = $5 AND person = $6""",
-                trust_level, style, dynamic, now, self._agent, person,
-            )
-        else:
-            await self._db.execute(
-                """INSERT INTO relationships (agent, person, trust_level, style, dynamic, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6)""",
-                self._agent, person, trust_level, style, dynamic, now,
-            )

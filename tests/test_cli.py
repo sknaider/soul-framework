@@ -64,6 +64,18 @@ def test_remember_without_create_still_works(tmp_path, capsys):
     assert "sky is blue" in capsys.readouterr().out
 
 
+def test_create_personality_reaches_boot_context(tmp_path, capsys):
+    """Regression: CLI must use the IdentityManager's public field name."""
+    db = str(tmp_path / "personality.db")
+    assert cli.main([
+        "create", "Maya", "--db", db,
+        "--personality", "Direct, protective, and meticulous",
+    ]) == 0
+    capsys.readouterr()
+    assert cli.main(["boot", "Maya", "--db", db]) == 0
+    assert "Direct, protective, and meticulous" in capsys.readouterr().out
+
+
 def test_bad_ocean_count_is_error(tmp_path, capsys):
     """--ocean with the wrong number of values exits 2 (validation error, not a crash)."""
     db = str(tmp_path / "x.db")

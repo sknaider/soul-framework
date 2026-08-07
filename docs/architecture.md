@@ -10,7 +10,9 @@ SOUL gives AI agents a persistent identity, memory, and personality that survive
 
 2. **Separation of soul and model.** The framework is LLM-agnostic. Your agent can be backed by GPT, Claude, Llama, Qwen, or any other model. SOUL doesn't care — it only provides the substrate (memory, personality, continuity).
 
-3. **Semantic over keyword.** Memories are stored with embeddings and retrieved by meaning, ranked by similarity, importance, and recency.
+3. **Embedding-first retrieval.** Memories are ranked by vector similarity,
+   importance, and recency. The base provider is lexical; the optional
+   sentence-transformer provider supplies true semantic vectors.
 
 4. **Zero-config by default.** `Soul.create("Maya")` works out of the box with SQLite and a local embedding provider. No database setup, no API keys, no cloud.
 
@@ -26,6 +28,8 @@ soul_framework/
 ├── backend/             # Persistent storage (abstract + implementations)
 │   ├── base.py          #   BackendBase — the storage contract
 │   ├── sqlite.py        #   SqliteBackend — default, zero-config
+│   ├── postgres.py      #   PostgresBackend — asyncpg + indexed pgvector
+│   └── postgres_schema.py # idempotent, dimension-locked PostgreSQL DDL
 │   └── schema.py        #   Shared SQL schema definitions
 │
 ├── embedding/           # Turn text into vectors
@@ -147,7 +151,7 @@ Every memory has:
 | `embedding` | Vector for semantic search |
 | `category` | `fact`, `preference`, `decision`, `insight`, `correction`, `milestone`, `pattern`, `emotion`, `trust`, `humor`, `dynamic` |
 | `importance` | 1–10 scale — affects ranking and consolidation |
-| `scope` | `private`, `shared`, `team` — controls visibility across agents |
+| `scope` | `private`, `shared`, `team` — metadata/filter inside one soul namespace; Core does not grant cross-agent access |
 | `valence`, `arousal`, `dominance` | VAD affective state |
 | `confidence` | How sure the agent is of this memory |
 | `utility` | Measured usefulness (updated by feedback) |
@@ -201,7 +205,10 @@ Some knowledge is how-to, not what-is: multi-step procedures, recipes, workflows
 
 ### Custom Backend
 
-Implement `BackendBase` and pass your instance to `Soul.create(..., backend=my_backend)`. You need to handle the schema defined in `backend/schema.py` — migrations for memory, identity, rules, instincts, inner_monologue, and the rest.
+The public `Soul.create()` factory supports `sqlite` and `postgres`. `BackendBase`
+is the internal storage protocol; custom adapters currently require integrating a
+new factory branch and implementing the SQL plus optional vector operations. Direct
+backend-instance injection is not part of the v0.3.0 public API.
 
 ### Custom Embedding
 

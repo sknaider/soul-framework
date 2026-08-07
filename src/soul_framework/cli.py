@@ -33,7 +33,7 @@ def _version() -> str:
 
         return version("soul-framework")
     except Exception:
-        return "0.2.0"
+        return "0.3.0"
 
 
 def _slug(name: str) -> str:
@@ -81,7 +81,7 @@ def _parse_ocean(raw: str) -> dict[str, float]:
 
 async def _cmd_create(args: argparse.Namespace) -> int:
     ocean = _parse_ocean(args.ocean) if args.ocean else None
-    personality = {"description": args.personality} if args.personality else None
+    personality = {"personality": args.personality} if args.personality else None
     async with Soul.create(
         args.name, backend_url=_db_path(args.name, args.db),
         ocean=ocean, personality=personality,

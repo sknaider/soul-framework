@@ -107,6 +107,16 @@ class MemoryStore:
         emb_bytes = _pack_embedding(vec)
         meta_json = json.dumps(metadata or {})
 
+        values = (
+            self._agent, category, content, emb_bytes, importance,
+            valence, arousal, dominance, source, scope,
+            confidence, utility, event_time or now, episode_context,
+            meta_json, now, now,
+        )
+        atomic_insert = getattr(self._db, "insert_memory_with_vector", None)
+        if callable(atomic_insert):
+            return await atomic_insert(values, vec)
+
         row = await self._db.fetchone(
             """INSERT INTO memories
                (agent, category, content, embedding, importance, valence, arousal, dominance,
@@ -114,10 +124,7 @@ class MemoryStore:
                 metadata, valid_from, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                RETURNING id""",
-            self._agent, category, content, emb_bytes, importance,
-            valence, arousal, dominance, source, scope,
-            confidence, utility, event_time or now, episode_context,
-            meta_json, now, now,
+            *values,
         )
         return row["id"] if row else 0
 
@@ -134,38 +141,56 @@ class MemoryStore:
         limit = limit or self._config.memory_search_default_limit
         query_vec = await self._emb.embed(query)
 
-        # Build filter SQL
-        conditions = ["agent = $1", "invalid_at IS NULL"]
-        params: list[Any] = [self._agent]
-        idx = 2
-        if category:
-            conditions.append(f"category = ${idx}")
-            params.append(category)
-            idx += 1
-        if min_importance > 0:
-            conditions.append(f"importance >= ${idx}")
-            params.append(min_importance)
-            idx += 1
-        if scope:
-            conditions.append(f"scope = ${idx}")
-            params.append(scope)
-            idx += 1
-
-        where = " AND ".join(conditions)
-        rows = await self._db.fetchall(
-            f"SELECT * FROM memories WHERE {where}",
-            *params,
-        )
+        vector_search = getattr(self._db, "search_memory_vectors", None)
+        if callable(vector_search):
+            candidate_limit = max(
+                limit,
+                self._config.memory_search_candidate_limit,
+            )
+            rows = await vector_search(
+                self._agent,
+                query_vec,
+                category=category,
+                min_importance=min_importance,
+                scope=scope,
+                limit=candidate_limit,
+            )
+        else:
+            # SQLite fallback: exact scan over packed vectors.
+            conditions = ["agent = $1", "invalid_at IS NULL"]
+            params: list[Any] = [self._agent]
+            idx = 2
+            if category:
+                conditions.append(f"category = ${idx}")
+                params.append(category)
+                idx += 1
+            if min_importance > 0:
+                conditions.append(f"importance >= ${idx}")
+                params.append(min_importance)
+                idx += 1
+            if scope:
+                conditions.append(f"scope = ${idx}")
+                params.append(scope)
+                idx += 1
+            rows = await self._db.fetchall(
+                f"SELECT * FROM memories WHERE {' AND '.join(conditions)}",
+                *params,
+            )
 
         now = datetime.now(timezone.utc)
         results: list[SearchResult] = []
 
         for row in rows:
-            emb_data = row.get("embedding")
-            if not emb_data:
-                continue
-            mem_vec = _unpack_embedding(emb_data)
-            sim = cosine_similarity(query_vec, mem_vec)
+            if "_vector_similarity" in row:
+                sim = float(row["_vector_similarity"])
+            else:
+                emb_data = row.get("embedding")
+                if not emb_data:
+                    continue
+                if isinstance(emb_data, memoryview):
+                    emb_data = emb_data.tobytes()
+                mem_vec = _unpack_embedding(emb_data)
+                sim = cosine_similarity(query_vec, mem_vec)
 
             # Calculate age in days
             try:
@@ -252,47 +277,43 @@ class MemoryStore:
         if not existing:
             return False
 
+        changes: dict[str, Any] = {}
+        new_vector: list[float] | None = None
+        if content is not None and content != existing.content:
+            new_vector = await self._emb.embed(content)
+            changes["content"] = content
+            changes["embedding"] = _pack_embedding(new_vector)
+        if importance is not None:
+            changes["importance"] = importance
+        if category is not None:
+            changes["category"] = category
+        if utility is not None:
+            changes["utility_score"] = utility
+        if confidence is not None:
+            changes["confidence_score"] = confidence
+        if metadata is not None:
+            changes["metadata"] = json.dumps(metadata)
+
+        if not changes:
+            return True
+
+        atomic_update = getattr(self._db, "update_memory_fields", None)
+        if callable(atomic_update):
+            return await atomic_update(
+                memory_id, self._agent, changes, new_vector
+            )
+
         sets: list[str] = []
         params: list[Any] = []
-        idx = 1
-
-        if content is not None and content != existing.content:
-            vec = await self._emb.embed(content)
-            sets.append(f"content = ${idx}")
-            params.append(content)
-            idx += 1
-            sets.append(f"embedding = ${idx}")
-            params.append(_pack_embedding(vec))
-            idx += 1
-        if importance is not None:
-            sets.append(f"importance = ${idx}")
-            params.append(importance)
-            idx += 1
-        if category is not None:
-            sets.append(f"category = ${idx}")
-            params.append(category)
-            idx += 1
-        if utility is not None:
-            sets.append(f"utility_score = ${idx}")
-            params.append(utility)
-            idx += 1
-        if confidence is not None:
-            sets.append(f"confidence_score = ${idx}")
-            params.append(confidence)
-            idx += 1
-        if metadata is not None:
-            sets.append(f"metadata = ${idx}")
-            params.append(json.dumps(metadata))
-            idx += 1
-
-        if not sets:
-            return True  # nothing to update
-
-        sets_sql = ", ".join(sets)
+        for idx, (column, value) in enumerate(changes.items(), start=1):
+            sets.append(f"{column} = ${idx}")
+            params.append(value)
+        next_idx = len(params) + 1
         params.append(memory_id)
         params.append(self._agent)
         await self._db.execute(
-            f"UPDATE memories SET {sets_sql} WHERE id = ${idx} AND agent = ${idx + 1}",
+            f"UPDATE memories SET {', '.join(sets)} "
+            f"WHERE id = ${next_idx} AND agent = ${next_idx + 1}",
             *params,
         )
         return True

@@ -26,7 +26,10 @@ class SentenceTransformerEmbedding:
                 "Install with: pip install soul-framework[embeddings]"
             )
         self._model = SentenceTransformer(model_name)
-        self._dimensions = self._model.get_sentence_embedding_dimension()
+        get_dimensions = getattr(self._model, "get_embedding_dimension", None)
+        if get_dimensions is None:  # sentence-transformers < 5.0
+            get_dimensions = self._model.get_sentence_embedding_dimension
+        self._dimensions = get_dimensions()
 
     @property
     def dimensions(self) -> int:

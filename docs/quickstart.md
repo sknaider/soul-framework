@@ -49,7 +49,7 @@ async def main():
             importance=7,
         )
 
-        # Search memories semantically
+        # Search memories (lexical by default; semantic with [embeddings])
         results = await agent.memory.search("what does the user like?")
         for r in results:
             print(f"[{r.similarity:.2f}] {r.memory.content}")
@@ -72,7 +72,9 @@ asyncio.run(main())
 
 1. **`Soul.create("Maya", ocean={...})`** -- created an agent named Maya with an OCEAN personality profile. This is stored persistently.
 
-2. **`agent.memory.store(...)`** -- stored a memory with semantic embedding. Memories are searchable by meaning, not just keywords.
+2. **`agent.memory.store(...)`** -- stored a memory with an embedding. The zero-config
+   provider is lexical; install `[embeddings]` and select `sentence-transformer`
+   for retrieval by meaning.
 
 3. **`agent.memory.search(...)`** -- found relevant memories using cosine similarity, ranked by relevance, importance, and recency.
 
@@ -119,15 +121,18 @@ await agent.memory.store("Prefers Python over JS",       category="preference", 
 
 Available categories: `fact`, `preference`, `decision`, `insight`, `correction`, `milestone`, `pattern`, `emotion`, `trust`, `humor`, `dynamic`.
 
-## Memory Scopes
+## Memory Scope Labels
 
-Control who can see each memory:
+Tag and filter memories inside one soul namespace:
 
 ```python
-await agent.memory.store("Internal architecture note", scope="private")   # Only this agent
-await agent.memory.store("Shared team decision",       scope="shared")    # Visible to peers
-await agent.memory.store("Company-wide announcement",  scope="team")      # All agents
+await agent.memory.store("Internal architecture note", scope="private")
+await agent.memory.store("Shared team decision",       scope="shared")
+await agent.memory.store("Company-wide announcement",  scope="team")
 ```
+
+Core does not grant cross-agent access from these labels. Every query remains
+isolated by soul name; multi-agent ACLs belong to the Platform coordination layer.
 
 ## Full Agent Snapshot
 

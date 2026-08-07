@@ -91,7 +91,7 @@ class Soul:
         backend_url: str = "",
         personality: dict[str, Any] | None = None,
         ocean: dict[str, float] | None = None,
-        embedding: EmbeddingProvider | str = "simple",
+        embedding: EmbeddingProvider | str | None = None,
         llm: LLMProvider | None = None,
         config: SoulConfig | None = None,
     ) -> _AsyncSoulContext:
@@ -116,41 +116,67 @@ class Soul:
         backend_url: str = "",
         personality: dict[str, Any] | None = None,
         ocean: dict[str, float] | None = None,
-        embedding: EmbeddingProvider | str = "simple",
+        embedding: EmbeddingProvider | str | None = None,
         llm: LLMProvider | None = None,
         config: SoulConfig | None = None,
     ) -> Soul:
         """Internal implementation of Soul creation."""
         cfg = config or SoulConfig(backend=backend, backend_url=backend_url)
+        backend_name = cfg.backend if config is not None else backend
+        backend_dsn = cfg.backend_url if config is not None else backend_url
 
-        # Initialize backend
-        if backend == "sqlite":
-            db = SqliteBackend(cfg.backend_url or ":memory:")
-        else:
-            raise ValueError(f"Unsupported backend: {backend}. v0.2 supports 'sqlite' (zero-config).")
-        await db.initialize()
-
-        # Initialize embedding
-        if isinstance(embedding, str):
-            if embedding == "simple":
+        # Resolve embedding first: pgvector needs its exact dimension at migration time.
+        embedding_choice = embedding if embedding is not None else cfg.embedding_provider
+        if isinstance(embedding_choice, str):
+            if embedding_choice == "simple":
                 emb = SimpleEmbedding(dimensions=cfg.embedding_dimensions)
+            elif embedding_choice in {"sentence-transformer", "sentence_transformer"}:
+                from soul_framework.embedding.sentence_transformer import (
+                    SentenceTransformerEmbedding,
+                )
+
+                emb = SentenceTransformerEmbedding()
             else:
-                raise ValueError(f"Unknown embedding provider: {embedding}")
+                raise ValueError(f"Unknown embedding provider: {embedding_choice}")
         else:
-            emb = embedding
+            emb = embedding_choice
 
-        # Initialize LLM
-        llm_inst = llm or StubProvider()
+        # Initialize backend only after embedding dimensions are known.
+        if backend_name == "sqlite":
+            db: BackendBase = SqliteBackend(backend_dsn or ":memory:")
+        elif backend_name == "postgres":
+            from soul_framework.backend.postgres import PostgresBackend
 
-        soul = cls(name, db, emb, llm_inst, cfg)
+            db = PostgresBackend(
+                backend_dsn,
+                dimensions=emb.dimensions,
+                schema=cfg.postgres_schema,
+                auto_migrate=cfg.postgres_auto_migrate,
+                min_size=cfg.postgres_pool_min_size,
+                max_size=cfg.postgres_pool_max_size,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backend: {backend_name}. Use 'sqlite' or 'postgres'."
+            )
+        await db.initialize()
+        try:
+            # Initialize LLM
+            llm_inst = llm or StubProvider()
 
-        # Set initial identity if ocean provided
-        if ocean:
-            await soul._identity.set_ocean(ocean)
-        if personality:
-            await soul._identity.set_personality(personality)
+            soul = cls(name, db, emb, llm_inst, cfg)
 
-        return soul
+            # Set initial identity if ocean provided
+            if ocean:
+                await soul._identity.set_ocean(ocean)
+            if personality:
+                await soul._identity.set_personality(personality)
+
+            return soul
+        except BaseException:
+            # A failed constructor must not strand SQLite handles or a PG pool.
+            await db.close()
+            raise
 
     @property
     def name(self) -> str:

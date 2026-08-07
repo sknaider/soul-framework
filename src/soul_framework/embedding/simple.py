@@ -1,8 +1,8 @@
-"""Simple embedding provider — TF-IDF hashing trick, zero external deps.
+"""Simple lexical embedding provider — token hashing, zero external deps.
 
 Produces fixed-size dense vectors using a hashing trick on word tokens.
-Good enough for basic semantic search with <10K memories.
-For production, use sentence-transformers: pip install soul-framework[embeddings]
+It ranks shared tokens and bigrams; it does not infer semantic similarity.
+For meaning-based search, use: pip install soul-framework[embeddings]
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def _tokenize(text: str) -> list[str]:
     """Simple whitespace + lowercase tokenizer."""
     text = text.lower()
     tokens = re.findall(r"\w+", text)
-    # Add bigrams for better semantic signal
+    # Add bigrams for a stronger lexical signal.
     bigrams = [f"{tokens[i]}_{tokens[i+1]}" for i in range(len(tokens) - 1)]
     return tokens + bigrams
 

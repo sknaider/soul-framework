@@ -1,6 +1,6 @@
 """OCEAN personality scoring and narrative generation.
 
-Exact copy of ocean_to_narrative from proyecto-seal/memory/soul/core/scoring.py.
+Adapted from Team SEAL internals for the public SOUL Framework API.
 """
 
 from __future__ import annotations
