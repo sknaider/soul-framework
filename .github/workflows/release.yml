@@ -117,6 +117,9 @@ jobs:
         run: |
           set -euo pipefail
           version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          # Base dependency must be present before importing the package for the runtime-version check
+          # (importing soul_framework loads the sqlite backend, which imports aiosqlite).
+          python -m pip install --quiet "aiosqlite>=0.20.0"
           runtime_version="$(PYTHONPATH=src python -c 'import soul_framework; print(soul_framework.__version__)')"
           test "${runtime_version}" = "${version}"
           test "${GITHUB_REF_NAME}" = "v${version}"
