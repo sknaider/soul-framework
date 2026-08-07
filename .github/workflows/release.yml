@@ -1,0 +1,250 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out frozen release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install ".[dev]"
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    name: Build and smoke-test distributions
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.contract.outputs.version }}
+    steps:
+      - name: Check out frozen release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Enforce tag and package version contract
+        id: contract
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+      - name: Install build tools
+        run: python -m pip install "build==1.3.0" "twine==6.2.0"
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Validate package metadata
+        run: python -m twine check dist/*
+      - name: Install and exercise the built wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/soul-wheel-smoke
+          /tmp/soul-wheel-smoke/bin/python -m pip install dist/*.whl
+          /tmp/soul-wheel-smoke/bin/python - <<'PY'
+          import asyncio
+          import os
+          import tempfile
+
+          from soul_framework import Soul
+
+          async def main() -> None:
+              db_path = tempfile.mktemp(prefix="soul-release-", suffix=".db")
+              async with Soul.create(
+                  "ReleaseGate",
+                  backend="sqlite",
+                  backend_url=db_path,
+                  ocean={"O": 0.8, "C": 0.9, "E": 0.6, "A": 0.7, "N": 0.2},
+              ) as agent:
+                  stored = await agent.memory.store(
+                      "Release artifacts must be verified by effect",
+                      category="decision",
+                      importance=9,
+                  )
+                  context = await agent.boot()
+                  reflected = await agent.reflect(
+                      "Release wheel smoke test passed",
+                      emotional_state="satisfied",
+                  )
+                  hits = await agent.memory.search("artifacts verified by effect")
+                  assert stored and reflected and hits
+                  assert "ReleaseGate" in context
+                  assert os.path.getsize(db_path) > 0
+              os.unlink(db_path)
+
+          asyncio.run(main())
+          print("RELEASE_WHEEL_SMOKE_OK")
+          PY
+      - name: Generate checksums
+        run: |
+          mkdir checksums
+          sha256sum dist/* > checksums/SHA256SUMS
+      - name: Upload distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-checksums
+          path: checksums/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    name: Attest build provenance
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Generate provenance attestations
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [build, attest]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/soul-framework
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Publish with TestPyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  verify-testpypi:
+    name: Verify package from TestPyPI
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Download expected distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: expected/
+      - name: Install dependencies from PyPI
+        run: python -m pip install "aiosqlite>=0.20.0"
+      - name: Fetch exact release from TestPyPI
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir fetched
+          for attempt in {1..12}; do
+            if python -m pip download --no-deps --only-binary=:all: \
+              --index-url https://test.pypi.org/simple/ \
+              --dest fetched/ \
+              "soul-framework==${VERSION}"; then
+              break
+            fi
+            sleep 10
+          done
+          test -n "$(find fetched -maxdepth 1 -name '*.whl' -print -quit)"
+          cmp expected/*.whl fetched/*.whl
+          python -m pip install --no-deps fetched/*.whl
+      - name: Import byte-matched TestPyPI release
+        run: python -c 'from soul_framework import Soul; print("TESTPYPI_BYTES_AND_IMPORT_OK", Soul.__name__)'
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build, verify-testpypi]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/soul-framework
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+
+  publish-github:
+    name: Publish GitHub release
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Download checksums
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-checksums
+          path: checksums/
+      - name: Create release for the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/* checksums/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "SOUL Framework ${GITHUB_REF_NAME}"
