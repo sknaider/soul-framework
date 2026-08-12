@@ -1,6 +1,6 @@
 [project]
 name = "soul-framework"
-version = "0.4.0"
+version = "0.4.1"
 description = "Persistent AI souls — memory, personality, identity for any LLM agent"
 readme = "README.md"
 requires-python = ">=3.11"
