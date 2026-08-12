@@ -8,17 +8,30 @@ Core operations:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import struct
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from soul_framework.backend.base import BackendBase
 from soul_framework.config import SoulConfig
 from soul_framework.embedding.base import EmbeddingProvider
 from soul_framework.embedding.simple import cosine_similarity
+from soul_framework.memory.query import contextualize_query
 from soul_framework.memory.scoring import temporal_decay_score
 from soul_framework.memory.types import Memory, SearchResult
+from soul_framework.memory.vector_index import (
+    HnswMemoryIndex,
+    StaleVectorIndexError,
+    VectorIndex,
+    create_vector_index,
+)
+
+if TYPE_CHECKING:
+    from soul_framework.integrity import SQLiteMemoryIntegrityGuard
 
 
 def _pack_embedding(vec: list[float]) -> bytes:
@@ -33,7 +46,7 @@ def _unpack_embedding(data: bytes) -> list[float]:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _row_to_memory(row: dict[str, Any]) -> Memory:
@@ -78,11 +91,120 @@ class MemoryStore:
         backend: BackendBase,
         embedding: EmbeddingProvider,
         config: SoulConfig,
+        integrity_guard: SQLiteMemoryIntegrityGuard | None = None,
     ) -> None:
         self._agent = agent
         self._db = backend
         self._emb = embedding
         self._config = config
+        self._integrity_guard = integrity_guard
+        self._vector_index: VectorIndex | None = None
+        self._vector_index_path: Path | None = None
+        self._index_dirty = False
+
+    async def verify_integrity(self) -> None:
+        if self._integrity_guard is not None:
+            await asyncio.to_thread(self._integrity_guard.verify_before_serve)
+
+    async def _seal_integrity(self) -> None:
+        if self._integrity_guard is not None:
+            await asyncio.to_thread(self._integrity_guard.seal_and_publish)
+
+    async def _fetchall(self, sql: str, *params: Any) -> list[dict[str, Any]]:
+        if self._integrity_guard is not None:
+            return await asyncio.to_thread(
+                self._integrity_guard.verified_fetchall, sql, *params
+            )
+        return await self._db.fetchall(sql, *params)
+
+    async def _fetchone(self, sql: str, *params: Any) -> dict[str, Any] | None:
+        if self._integrity_guard is not None:
+            return await asyncio.to_thread(
+                self._integrity_guard.verified_fetchone, sql, *params
+            )
+        return await self._db.fetchone(sql, *params)
+
+    async def _fetchval(self, sql: str, *params: Any) -> Any:
+        if self._integrity_guard is not None:
+            return await asyncio.to_thread(
+                self._integrity_guard.verified_fetchval, sql, *params
+            )
+        return await self._db.fetchval(sql, *params)
+
+    @staticmethod
+    def _rows_fingerprint(rows: list[dict[str, Any]]) -> str:
+        digest = hashlib.sha256()
+        for row in rows:
+            embedding = row.get("embedding") or b""
+            if isinstance(embedding, memoryview):
+                embedding = embedding.tobytes()
+            digest.update(str(int(row["id"])).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(embedding)
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    async def initialize_vector_index(self) -> None:
+        """Build/load the SQLite candidate index; PostgreSQL already uses pgvector."""
+        mode = self._config.memory_vector_index.lower()
+        if not self._config.memory_vector_cache or mode == "off":
+            return
+        if mode not in {"auto", "hnsw", "exact"}:
+            raise ValueError("memory_vector_index must be auto, hnsw, exact, or off")
+        if not hasattr(self._db, "url"):
+            return
+        rows = await self._fetchall(
+            "SELECT id, embedding FROM memories "
+            "WHERE agent = $1 AND invalid_at IS NULL AND embedding IS NOT NULL ORDER BY id",
+            self._agent,
+        )
+        ids: list[int] = []
+        vectors: list[list[float]] = []
+        for row in rows:
+            data = row["embedding"]
+            if isinstance(data, memoryview):
+                data = data.tobytes()
+            vector = _unpack_embedding(data)
+            if len(vector) != self._emb.dimensions:
+                raise RuntimeError(
+                    "Stored embedding dimensions do not match the selected provider; "
+                    "run soul_framework.embedding_migration before activation"
+                )
+            ids.append(int(row["id"]))
+            vectors.append(vector)
+
+        prefer_hnsw = mode in {"auto", "hnsw"}
+        index = create_vector_index(
+            self._emb.dimensions,
+            prefer_hnsw=prefer_hnsw,
+            m=self._config.memory_hnsw_m,
+            ef_construction=self._config.memory_hnsw_ef_construction,
+            ef_search=self._config.memory_hnsw_ef_search,
+        )
+        if mode == "hnsw" and not isinstance(index, HnswMemoryIndex):
+            raise ImportError("memory_vector_index='hnsw' requires the ann extra")
+
+        fingerprint = self._rows_fingerprint(rows)
+        db_url = str(getattr(self._db, "url", ":memory:"))
+        if (
+            isinstance(index, HnswMemoryIndex)
+            and db_url != ":memory:"
+            and self._integrity_guard is None
+        ):
+            suffix = hashlib.sha256(self._agent.encode("utf-8")).hexdigest()[:12]
+            self._vector_index_path = Path(f"{db_url}.{suffix}.hnsw")
+            try:
+                index = await asyncio.to_thread(
+                    HnswMemoryIndex.load,
+                    self._vector_index_path,
+                    source_fingerprint=fingerprint,
+                )
+            except StaleVectorIndexError:
+                await asyncio.to_thread(index.build, ids, vectors)
+                self._index_dirty = True
+        else:
+            await asyncio.to_thread(index.build, ids, vectors)
+        self._vector_index = index
 
     async def store(
         self,
@@ -108,25 +230,57 @@ class MemoryStore:
         meta_json = json.dumps(metadata or {})
 
         values = (
-            self._agent, category, content, emb_bytes, importance,
-            valence, arousal, dominance, source, scope,
-            confidence, utility, event_time or now, episode_context,
-            meta_json, now, now,
+            self._agent,
+            category,
+            content,
+            emb_bytes,
+            importance,
+            valence,
+            arousal,
+            dominance,
+            source,
+            scope,
+            confidence,
+            utility,
+            event_time or now,
+            episode_context,
+            meta_json,
+            now,
+            now,
         )
-        atomic_insert = getattr(self._db, "insert_memory_with_vector", None)
-        if callable(atomic_insert):
-            return await atomic_insert(values, vec)
-
-        row = await self._db.fetchone(
-            """INSERT INTO memories
+        insert_sql = """INSERT INTO memories
                (agent, category, content, embedding, importance, valence, arousal, dominance,
                 source, scope, confidence_score, utility_score, event_time, episode_context,
                 metadata, valid_from, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-               RETURNING id""",
-            *values,
-        )
-        return row["id"] if row else 0
+               RETURNING id"""
+        if self._integrity_guard is not None:
+            row = await asyncio.to_thread(
+                self._integrity_guard.mutate_and_publish,
+                insert_sql,
+                *values,
+                mode="one",
+            )
+            memory_id = int(row["id"]) if isinstance(row, dict) else 0
+            if memory_id and self._vector_index is not None:
+                await asyncio.to_thread(self._vector_index.add, memory_id, vec)
+                self._index_dirty = True
+            return memory_id
+
+        atomic_insert = getattr(self._db, "insert_memory_with_vector", None)
+        if callable(atomic_insert):
+            memory_id = await atomic_insert(values, vec)
+            await self._seal_integrity()
+            return memory_id
+
+        row = await self._db.fetchone(insert_sql, *values)
+        memory_id = row["id"] if row else 0
+        if memory_id and self._vector_index is not None:
+            await asyncio.to_thread(self._vector_index.add, memory_id, vec)
+            self._index_dirty = True
+        if memory_id:
+            await self._seal_integrity()
+        return memory_id
 
     async def search(
         self,
@@ -136,10 +290,14 @@ class MemoryStore:
         category: str = "",
         min_importance: int = 0,
         scope: str = "",
+        context: str | list[str] | None = None,
     ) -> list[SearchResult]:
-        """Semantic search: embed query, compute cosine similarity, rank with decay."""
+        """Semantic search with optional bounded conversation context."""
         limit = limit or self._config.memory_search_default_limit
-        query_vec = await self._emb.embed(query)
+        embedding_query = contextualize_query(
+            query, context, max_context_chars=self._config.memory_context_max_chars
+        )
+        query_vec = await self._emb.embed(embedding_query)
 
         vector_search = getattr(self._db, "search_memory_vectors", None)
         if callable(vector_search):
@@ -155,6 +313,32 @@ class MemoryStore:
                 scope=scope,
                 limit=candidate_limit,
             )
+        elif self._vector_index is not None and not (
+            category or min_importance or scope
+        ):
+            candidate_limit = max(limit, self._config.memory_search_candidate_limit)
+            hits = await asyncio.to_thread(
+                self._vector_index.search, query_vec, candidate_limit
+            )
+            similarities = {hit.memory_id: hit.similarity for hit in hits}
+            if hits:
+                placeholders = ",".join(f"${idx}" for idx in range(2, len(hits) + 2))
+                rows = await self._fetchall(
+                    f"SELECT * FROM memories WHERE agent = $1 AND invalid_at IS NULL "
+                    f"AND id IN ({placeholders})",
+                    self._agent,
+                    *(hit.memory_id for hit in hits),
+                )
+                for row in rows:
+                    row["_vector_similarity"] = similarities[int(row["id"])]
+            else:
+                rows = (
+                    await self._fetchall(
+                        "SELECT * FROM memories WHERE agent = $1 AND 0", self._agent
+                    )
+                    if self._integrity_guard is not None
+                    else []
+                )
         else:
             # SQLite fallback: exact scan over packed vectors.
             conditions = ["agent = $1", "invalid_at IS NULL"]
@@ -172,12 +356,30 @@ class MemoryStore:
                 conditions.append(f"scope = ${idx}")
                 params.append(scope)
                 idx += 1
-            rows = await self._db.fetchall(
+            rows = await self._fetchall(
                 f"SELECT * FROM memories WHERE {' AND '.join(conditions)}",
                 *params,
             )
 
-        now = datetime.now(timezone.utc)
+        # Exact text is a correctness fallback, not the main retrieval path.  It
+        # prevents ANN approximation or a weak embedding from hiding a literal
+        # old memory.  Semantic/filtered cases continue through the normal path.
+        if (
+            self._config.memory_exact_fallback
+            and query.strip()
+            and not (category or min_importance or scope)
+        ):
+            exact_rows = await self._fetchall(
+                "SELECT * FROM memories WHERE agent = $1 AND invalid_at IS NULL "
+                "AND content LIKE $2 LIMIT $3",
+                self._agent,
+                f"%{query.strip()}%",
+                max(limit, self._config.memory_search_candidate_limit),
+            )
+            present = {int(row["id"]) for row in rows}
+            rows.extend(row for row in exact_rows if int(row["id"]) not in present)
+
+        now = datetime.now(UTC)
         results: list[SearchResult] = []
 
         for row in rows:
@@ -196,7 +398,7 @@ class MemoryStore:
             try:
                 created = datetime.fromisoformat(row["created_at"])
                 if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
+                    created = created.replace(tzinfo=UTC)
                 days_old = max(0.0, (now - created).total_seconds() / 86400.0)
             except (ValueError, TypeError):
                 days_old = 0.0
@@ -211,12 +413,17 @@ class MemoryStore:
                 utility=row.get("utility_score", 0.5),
                 confidence=row.get("confidence_score", 1.0),
             )
+            # A highly relevant old memory must not disappear solely because it is old.
+            semantic_floor = max(0.0, sim) * self._config.memory_semantic_floor
+            score = max(score, semantic_floor) + row.get("importance", 5) * 1e-6
 
-            results.append(SearchResult(
-                memory=_row_to_memory(row),
-                score=score,
-                similarity=sim,
-            ))
+            results.append(
+                SearchResult(
+                    memory=_row_to_memory(row),
+                    score=score,
+                    similarity=sim,
+                )
+            )
 
         # Sort by score descending, return top N
         results.sort(key=lambda r: r.score, reverse=True)
@@ -224,9 +431,10 @@ class MemoryStore:
 
     async def get(self, memory_id: int) -> Memory | None:
         """Get a single memory by ID."""
-        row = await self._db.fetchone(
+        row = await self._fetchone(
             "SELECT * FROM memories WHERE id = $1 AND agent = $2",
-            memory_id, self._agent,
+            memory_id,
+            self._agent,
         )
         if not row:
             return None
@@ -255,7 +463,7 @@ class MemoryStore:
         conditions_with_limit = f"${idx}"
         params.append(limit)
 
-        rows = await self._db.fetchall(
+        rows = await self._fetchall(
             f"SELECT * FROM memories WHERE {where} ORDER BY created_at DESC LIMIT {conditions_with_limit}",
             *params,
         )
@@ -299,9 +507,10 @@ class MemoryStore:
 
         atomic_update = getattr(self._db, "update_memory_fields", None)
         if callable(atomic_update):
-            return await atomic_update(
-                memory_id, self._agent, changes, new_vector
-            )
+            updated = await atomic_update(memory_id, self._agent, changes, new_vector)
+            if updated:
+                await self._seal_integrity()
+            return updated
 
         sets: list[str] = []
         params: list[Any] = []
@@ -311,11 +520,26 @@ class MemoryStore:
         next_idx = len(params) + 1
         params.append(memory_id)
         params.append(self._agent)
-        await self._db.execute(
+        update_sql = (
             f"UPDATE memories SET {', '.join(sets)} "
-            f"WHERE id = ${next_idx} AND agent = ${next_idx + 1}",
-            *params,
+            f"WHERE id = ${next_idx} AND agent = ${next_idx + 1}"
         )
+        if self._integrity_guard is not None:
+            updated_rows = await asyncio.to_thread(
+                self._integrity_guard.mutate_and_publish,
+                update_sql,
+                *params,
+                mode="rowcount",
+            )
+            if int(updated_rows) != 1:
+                return False
+        else:
+            await self._db.execute(update_sql, *params)
+        if new_vector is not None and self._vector_index is not None:
+            await asyncio.to_thread(self._vector_index.add, memory_id, new_vector)
+            self._index_dirty = True
+        if self._integrity_guard is None:
+            await self._seal_integrity()
         return True
 
     async def invalidate(self, memory_id: int) -> bool:
@@ -323,21 +547,58 @@ class MemoryStore:
         existing = await self.get(memory_id)
         if not existing:
             return False
-        await self._db.execute(
-            "UPDATE memories SET invalid_at = $1 WHERE id = $2 AND agent = $3",
-            _now_iso(), memory_id, self._agent,
+        invalidate_sql = (
+            "UPDATE memories SET invalid_at = $1 WHERE id = $2 AND agent = $3"
         )
+        invalidate_params = (_now_iso(), memory_id, self._agent)
+        if self._integrity_guard is not None:
+            updated_rows = await asyncio.to_thread(
+                self._integrity_guard.mutate_and_publish,
+                invalidate_sql,
+                *invalidate_params,
+                mode="rowcount",
+            )
+            if int(updated_rows) != 1:
+                return False
+        else:
+            await self._db.execute(invalidate_sql, *invalidate_params)
+        if self._vector_index is not None:
+            await asyncio.to_thread(self._vector_index.remove, memory_id)
+            self._index_dirty = True
+        if self._integrity_guard is None:
+            await self._seal_integrity()
         return True
+
+    async def close(self) -> None:
+        """Persist a byte-bound HNSW sidecar after successful mutations."""
+        if (
+            self._index_dirty
+            and isinstance(self._vector_index, HnswMemoryIndex)
+            and self._vector_index_path is not None
+            and self._integrity_guard is None
+        ):
+            rows = await self._fetchall(
+                "SELECT id, embedding FROM memories WHERE agent = $1 "
+                "AND invalid_at IS NULL AND embedding IS NOT NULL ORDER BY id",
+                self._agent,
+            )
+            await asyncio.to_thread(
+                self._vector_index.save,
+                self._vector_index_path,
+                source_fingerprint=self._rows_fingerprint(rows),
+            )
+            self._index_dirty = False
 
     async def count(self, *, category: str = "") -> int:
         """Count valid memories for this agent."""
         if category:
-            val = await self._db.fetchval(
+            val = await self._fetchval(
                 "SELECT COUNT(*) FROM memories WHERE agent = $1 AND category = $2 AND invalid_at IS NULL",
-                self._agent, category,
+                self._agent,
+                category,
             )
         else:
-            val = await self._db.fetchval(
+            val = await self._fetchval(
                 "SELECT COUNT(*) FROM memories WHERE agent = $1 AND invalid_at IS NULL",
                 self._agent,
             )

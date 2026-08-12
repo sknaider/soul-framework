@@ -11,7 +11,8 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any, Coroutine
+from collections.abc import Coroutine
+from typing import Any, Self
 
 
 class _AsyncSoulContext:
@@ -24,20 +25,21 @@ class _AsyncSoulContext:
 
     __slots__ = ("_coro", "_soul")
 
-    def __init__(self, coro: Coroutine[Any, Any, "Soul"]) -> None:
+    def __init__(self, coro: Coroutine[Any, Any, Soul]) -> None:
         self._coro = coro
         self._soul: Soul | None = None
 
     def __await__(self):
         return self._coro.__await__()
 
-    async def __aenter__(self) -> "Soul":
+    async def __aenter__(self) -> Self:
         self._soul = await self._coro
         return self._soul
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         if self._soul is not None:
             await self._soul.close()
+
 
 from soul_framework.backend.base import BackendBase
 from soul_framework.backend.sqlite import SqliteBackend
@@ -67,13 +69,16 @@ class Soul:
         embedding: EmbeddingProvider,
         llm: LLMProvider,
         config: SoulConfig,
+        integrity_guard: Any | None = None,
     ) -> None:
         self._name = name
         self._backend = backend
         self._embedding = embedding
         self._llm = llm
         self._config = config
-        self._memory = MemoryStore(name, backend, embedding, config)
+        self._memory = MemoryStore(
+            name, backend, embedding, config, integrity_guard=integrity_guard
+        )
         self._identity = IdentityManager(name, backend, config)
         self._rules = RuleManager(name, backend)
         self._instincts = InstinctManager(name, backend)
@@ -94,6 +99,7 @@ class Soul:
         embedding: EmbeddingProvider | str | None = None,
         llm: LLMProvider | None = None,
         config: SoulConfig | None = None,
+        integrity_guard: Any | None = None,
     ) -> _AsyncSoulContext:
         """Create a new Soul instance with all subsystems initialized.
 
@@ -101,11 +107,19 @@ class Soul:
             agent = await Soul.create("Maya", ...)
             async with Soul.create("Maya", ...) as agent:
         """
-        return _AsyncSoulContext(cls._create_impl(
-            name, backend=backend, backend_url=backend_url,
-            personality=personality, ocean=ocean,
-            embedding=embedding, llm=llm, config=config,
-        ))
+        return _AsyncSoulContext(
+            cls._create_impl(
+                name,
+                backend=backend,
+                backend_url=backend_url,
+                personality=personality,
+                ocean=ocean,
+                embedding=embedding,
+                llm=llm,
+                config=config,
+                integrity_guard=integrity_guard,
+            )
+        )
 
     @classmethod
     async def _create_impl(
@@ -119,6 +133,7 @@ class Soul:
         embedding: EmbeddingProvider | str | None = None,
         llm: LLMProvider | None = None,
         config: SoulConfig | None = None,
+        integrity_guard: Any | None = None,
     ) -> Soul:
         """Internal implementation of Soul creation."""
         cfg = config or SoulConfig(backend=backend, backend_url=backend_url)
@@ -126,7 +141,9 @@ class Soul:
         backend_dsn = cfg.backend_url if config is not None else backend_url
 
         # Resolve embedding first: pgvector needs its exact dimension at migration time.
-        embedding_choice = embedding if embedding is not None else cfg.embedding_provider
+        embedding_choice = (
+            embedding if embedding is not None else cfg.embedding_provider
+        )
         if isinstance(embedding_choice, str):
             if embedding_choice == "simple":
                 emb = SimpleEmbedding(dimensions=cfg.embedding_dimensions)
@@ -136,6 +153,14 @@ class Soul:
                 )
 
                 emb = SentenceTransformerEmbedding()
+            elif embedding_choice in {"bge-m3", "bge_m3"}:
+                from soul_framework.embedding.bge_m3 import BgeM3Embedding
+
+                emb = BgeM3Embedding(
+                    model=cfg.ollama_embedding_model,
+                    url=cfg.ollama_embedding_url,
+                    timeout=cfg.ollama_embedding_timeout,
+                )
             else:
                 raise ValueError(f"Unknown embedding provider: {embedding_choice}")
         else:
@@ -164,7 +189,13 @@ class Soul:
             # Initialize LLM
             llm_inst = llm or StubProvider()
 
-            soul = cls(name, db, emb, llm_inst, cfg)
+            if integrity_guard is not None and backend_name != "sqlite":
+                raise ValueError(
+                    "SQLiteMemoryIntegrityGuard requires the sqlite backend"
+                )
+            soul = cls(name, db, emb, llm_inst, cfg, integrity_guard)
+            await soul._memory.verify_integrity()
+            await soul._memory.initialize_vector_index()
 
             # Set initial identity if ocean provided
             if ocean:
@@ -215,6 +246,7 @@ class Soul:
 
         Loads: identity, OCEAN narrative, relationships, critical rules, last thought.
         """
+        await self._memory.verify_integrity()
         parts: list[str] = []
 
         # Identity
@@ -237,7 +269,9 @@ class Soul:
         if rels:
             parts.append("\n## Relationships")
             for r in rels:
-                parts.append(f"- {r['person']}: trust={r['trust_level']}, style={r.get('style', 'default')}")
+                parts.append(
+                    f"- {r['person']}: trust={r['trust_level']}, style={r.get('style', 'default')}"
+                )
 
         # Critical rules
         rules = await self._rules.get_critical(limit=5)
@@ -249,7 +283,9 @@ class Soul:
         # Last inner thought
         last_thought = await self._reflection.get_last_thought()
         if last_thought:
-            parts.append(f"\n## Last Inner Thought [{last_thought.get('emotional_state', '')}]")
+            parts.append(
+                f"\n## Last Inner Thought [{last_thought.get('emotional_state', '')}]"
+            )
             parts.append(f"({last_thought['created_at']}): {last_thought['thought']}")
 
         parts.append("\n## Boot Protocol")
@@ -285,10 +321,11 @@ class Soul:
 
     async def close(self) -> None:
         """Clean shutdown of backend connections."""
+        await self._memory.close()
         await self._backend.close()
 
-    async def __aenter__(self) -> Soul:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         await self.close()

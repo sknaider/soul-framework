@@ -9,7 +9,6 @@ import aiosqlite
 
 from soul_framework.backend.schema import SCHEMA_SQL
 
-
 # Translate $1, $2, ... (asyncpg style) to ? (sqlite style)
 _PG_PARAM_RE = re.compile(r"\$(\d+)")
 
@@ -36,6 +35,10 @@ class SqliteBackend:
     def __init__(self, url: str = ":memory:") -> None:
         self._url = url
         self._db: aiosqlite.Connection | None = None
+
+    @property
+    def url(self) -> str:
+        return self._url
 
     async def initialize(self) -> None:
         """Open connection and create tables."""
