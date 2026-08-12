@@ -9,6 +9,7 @@ from soul_framework.memory.vector_index import (
     ExactVectorIndex,
     HnswMemoryIndex,
     StaleVectorIndexError,
+    USearchMemoryIndex,
     create_vector_index,
 )
 
@@ -50,7 +51,46 @@ def test_factory_falls_back_when_optional_dependency_is_missing(monkeypatch):
         raise ImportError("not installed")
 
     monkeypatch.setattr(mod, "_load_hnsw_dependencies", missing)
+    monkeypatch.setattr(mod, "_load_usearch_dependencies", missing)
     assert isinstance(create_vector_index(3), ExactVectorIndex)
+
+
+def test_explicit_missing_engine_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        mod, "_load_usearch_dependencies", lambda: (_ for _ in ()).throw(ImportError())
+    )
+    with pytest.raises(ImportError):
+        create_vector_index(3, engine="usearch")
+
+
+def test_usearch_round_trip_update_remove_and_fingerprint(tmp_path):
+    pytest.importorskip("usearch")
+    ids, vectors = _corpus()
+    index = USearchMemoryIndex(3, expansion_search=20)
+    index.build(ids, vectors)
+    assert index.search([1.0, 0.0, 0.0], 1)[0].memory_id == 10
+    index.add(20, [0.0, 1.0, 0.0])
+    assert index.remove(40) is True
+
+    path = tmp_path / "memory.usearch"
+    index.save(path, source_fingerprint="db-state-1")
+    loaded = USearchMemoryIndex.load(path, source_fingerprint="db-state-1")
+    assert loaded.count == 3
+    assert loaded.search([0.0, 1.0, 0.0], 2)[0].memory_id in {20, 30}
+    with pytest.raises(StaleVectorIndexError, match="fingerprint"):
+        USearchMemoryIndex.load(path, source_fingerprint="different")
+
+
+def test_usearch_corrupt_bytes_fail_closed(tmp_path):
+    pytest.importorskip("usearch")
+    ids, vectors = _corpus()
+    path = tmp_path / "memory.usearch"
+    index = USearchMemoryIndex(3)
+    index.build(ids, vectors)
+    index.save(path, source_fingerprint="db-state-1")
+    path.write_bytes(path.read_bytes() + b"tampered")
+    with pytest.raises(StaleVectorIndexError, match="checksum"):
+        USearchMemoryIndex.load(path, source_fingerprint="db-state-1")
 
 
 def test_hnsw_round_trip_and_source_fingerprint(tmp_path):

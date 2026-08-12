@@ -33,7 +33,7 @@ class SoulConfig:
     memory_search_default_limit: int = 10
     memory_search_candidate_limit: int = 100
     memory_vector_cache: bool = True  # cache embeddings in memory for SQLite search
-    memory_vector_index: str = "auto"  # auto | hnsw | exact | off
+    memory_vector_index: str = "auto"  # auto | usearch | hnsw | exact | off
     memory_hnsw_m: int = 16
     memory_hnsw_ef_construction: int = 200
     memory_hnsw_ef_search: int = 20_000

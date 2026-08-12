@@ -38,7 +38,7 @@ soul snapshot Maya                                # compact view of the soul's s
 ```bash
 pip install soul-framework              # base: identity + memory + boot + reflect, SQLite, zero config
 pip install soul-framework[embeddings]  # add TRUE semantic memory search (sentence-transformers)
-pip install soul-framework[ann]         # add persistent HNSW search for large SQLite souls
+pip install soul-framework[ann]         # add portable graph-ANN search for large SQLite souls
 pip install soul-framework[integrity]   # add signed integrity checkpoints
 pip install soul-framework[postgres]    # add PostgreSQL + indexed pgvector storage
 ```
@@ -78,13 +78,14 @@ the nearest `memory_search_candidate_limit` vectors and then applies SOUL's
 importance/recency scoring; raise that limit when those secondary signals must
 consider a wider candidate set.
 
-The `soul` CLI intentionally remains the zero-config SQLite path in v0.4.1;
+The `soul` CLI intentionally remains the zero-config SQLite path in v0.4.2;
 PostgreSQL is configured through the Python API shown above.
 
 ### Five-year SQLite path (local and sovereign)
 
 For a large local soul, BGE-M3 runs through the loopback-only Ollama API and
-HNSW avoids scanning every memory:
+Graph ANN avoids scanning every memory. Linux/macOS use HNSW; Python 3.13 on
+Windows uses USearch because hnswlib does not publish a compatible wheel there:
 
 ```bash
 ollama pull bge-m3
@@ -99,7 +100,7 @@ config = SoulConfig(
     backend_url="maya.db",
     embedding_provider="bge-m3",
     embedding_dimensions=1024,
-    memory_vector_index="hnsw",
+    memory_vector_index="auto",
 )
 
 async with Soul.create("Maya", config=config) as agent:
@@ -122,7 +123,7 @@ The five-year engineering gate used 54,750 synthetic memories: all 8 fixed
 contextual anchors appeared in the top 5 (7/8 ranked first), and end-to-end
 retrieval measured 280 ms p50 on the test host. This validates the candidate path, not a universal "never
 forgets" claim; natural corpora and broader probes remain application gates.
-The HNSW sidecar is bound to the SQLite source fingerprint and is rebuilt
+The HNSW/USearch sidecar is bound to the SQLite source fingerprint and is rebuilt
 fail-closed if stale or corrupt.
 
 Signed Ed25519 checkpoints are available through
@@ -171,7 +172,7 @@ remember who it is and what it learned?*
 
 ## Status
 
-Alpha (v0.4.1) — local BGE-M3 + HNSW + reversible embedding migration,
+Alpha (v0.4.2) — local BGE-M3 + portable HNSW/USearch ANN + reversible embedding migration,
 with optional signed integrity checkpoints. API may still shift before 1.0.
 
 ## License
