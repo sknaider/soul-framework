@@ -26,6 +26,7 @@ from soul_framework.memory.types import Memory, SearchResult
 from soul_framework.memory.vector_index import (
     HnswMemoryIndex,
     StaleVectorIndexError,
+    USearchMemoryIndex,
     VectorIndex,
     create_vector_index,
 )
@@ -149,8 +150,10 @@ class MemoryStore:
         mode = self._config.memory_vector_index.lower()
         if not self._config.memory_vector_cache or mode == "off":
             return
-        if mode not in {"auto", "hnsw", "exact"}:
-            raise ValueError("memory_vector_index must be auto, hnsw, exact, or off")
+        if mode not in {"auto", "usearch", "hnsw", "exact"}:
+            raise ValueError(
+                "memory_vector_index must be auto, usearch, hnsw, exact, or off"
+            )
         if not hasattr(self._db, "url"):
             return
         rows = await self._fetchall(
@@ -173,29 +176,28 @@ class MemoryStore:
             ids.append(int(row["id"]))
             vectors.append(vector)
 
-        prefer_hnsw = mode in {"auto", "hnsw"}
         index = create_vector_index(
             self._emb.dimensions,
-            prefer_hnsw=prefer_hnsw,
+            engine=mode,
             m=self._config.memory_hnsw_m,
             ef_construction=self._config.memory_hnsw_ef_construction,
             ef_search=self._config.memory_hnsw_ef_search,
         )
-        if mode == "hnsw" and not isinstance(index, HnswMemoryIndex):
-            raise ImportError("memory_vector_index='hnsw' requires the ann extra")
 
         fingerprint = self._rows_fingerprint(rows)
         db_url = str(getattr(self._db, "url", ":memory:"))
         if (
-            isinstance(index, HnswMemoryIndex)
+            isinstance(index, (HnswMemoryIndex, USearchMemoryIndex))
             and db_url != ":memory:"
             and self._integrity_guard is None
         ):
             suffix = hashlib.sha256(self._agent.encode("utf-8")).hexdigest()[:12]
-            self._vector_index_path = Path(f"{db_url}.{suffix}.hnsw")
+            engine_name = "usearch" if isinstance(index, USearchMemoryIndex) else "hnsw"
+            index_type = USearchMemoryIndex if engine_name == "usearch" else HnswMemoryIndex
+            self._vector_index_path = Path(f"{db_url}.{suffix}.{engine_name}")
             try:
                 index = await asyncio.to_thread(
-                    HnswMemoryIndex.load,
+                    index_type.load,
                     self._vector_index_path,
                     source_fingerprint=fingerprint,
                 )
@@ -570,10 +572,10 @@ class MemoryStore:
         return True
 
     async def close(self) -> None:
-        """Persist a byte-bound HNSW sidecar after successful mutations."""
+        """Persist a byte-bound native ANN sidecar after successful mutations."""
         if (
             self._index_dirty
-            and isinstance(self._vector_index, HnswMemoryIndex)
+            and isinstance(self._vector_index, (HnswMemoryIndex, USearchMemoryIndex))
             and self._vector_index_path is not None
             and self._integrity_guard is None
         ):

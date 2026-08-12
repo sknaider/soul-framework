@@ -1,8 +1,8 @@
 """Optional vector indexes for SQLite memory retrieval.
 
 ``ExactVectorIndex`` is the dependency-free correctness fallback.
-``HnswMemoryIndex`` uses hnswlib when installed and persists a byte-bound
-sidecar so a stale/corrupt index fails closed instead of serving wrong labels.
+``HnswMemoryIndex`` and ``USearchMemoryIndex`` use native ANN engines and persist
+byte-bound sidecars so a stale/corrupt index fails closed instead of serving wrong labels.
 
 This module deliberately does not mutate the SQLite schema or MemoryStore API.
 The integration layer may rebuild from SQLite and switch back to exact search
@@ -127,6 +127,18 @@ def _load_hnsw_dependencies() -> tuple[Any, Any]:
             "or keep the dependency-free exact SQLite fallback."
         ) from exc
     return hnswlib, numpy
+
+
+def _load_usearch_dependencies() -> tuple[Any, Any]:
+    try:
+        import numpy
+        from usearch.index import Index
+    except ImportError as exc:  # pragma: no cover - controlled through monkeypatch
+        raise ImportError(
+            "USearch ANN retrieval requires usearch and numpy. Install the ANN "
+            "extra, or keep the dependency-free exact SQLite fallback."
+        ) from exc
+    return Index, numpy
 
 
 def _sha256(path: Path) -> str:
@@ -364,16 +376,230 @@ class HnswMemoryIndex:
         return self._numpy.asarray(rows, dtype="float32")
 
 
+class USearchMemoryIndex:
+    """Portable graph ANN index with CPython 3.13 Windows wheels.
+
+    hnswlib has no binary wheel for the Python 3.13 Windows runtime used by the
+    SOUL laptop. USearch provides the same cosine graph-ANN contract without
+    requiring a compiler, while the exact index remains the fail-safe fallback.
+    """
+
+    def __init__(
+        self,
+        dimensions: int,
+        *,
+        connectivity: int = 16,
+        expansion_add: int = 200,
+        expansion_search: int = 400,
+    ) -> None:
+        if dimensions < 1:
+            raise ValueError("dimensions must be >= 1")
+        if connectivity < 2 or expansion_add < 2 or expansion_search < 1:
+            raise ValueError("invalid USearch parameters")
+        self._Index, self._numpy = _load_usearch_dependencies()
+        self._dimensions = int(dimensions)
+        self._connectivity = int(connectivity)
+        self._expansion_add = int(expansion_add)
+        self._expansion_search = int(expansion_search)
+        self._index: Any | None = None
+        self._labels: set[int] = set()
+        self._lock = threading.RLock()
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    @property
+    def count(self) -> int:
+        return len(self._labels)
+
+    def _new_index(self) -> Any:
+        return self._Index(
+            ndim=self._dimensions,
+            metric="cos",
+            dtype="f32",
+            connectivity=self._connectivity,
+            expansion_add=self._expansion_add,
+            expansion_search=self._expansion_search,
+            enable_key_lookups=True,
+        )
+
+    def _matrix(self, vectors: Iterable[Sequence[float]]) -> Any:
+        rows = [_validate_vector(vector, self._dimensions) for vector in vectors]
+        return self._numpy.asarray(rows, dtype="float32")
+
+    def build(self, ids: Sequence[int], vectors: Sequence[Sequence[float]]) -> None:
+        if len(ids) != len(vectors):
+            raise ValueError("ids and vectors must have the same length")
+        labels = [int(memory_id) for memory_id in ids]
+        if len(set(labels)) != len(labels):
+            raise ValueError("memory ids must be unique")
+        matrix = self._matrix(vectors)
+        with self._lock:
+            index = self._new_index()
+            if labels:
+                index.add(
+                    self._numpy.asarray(labels, dtype="uint64"),
+                    matrix,
+                    threads=1,
+                )
+            self._index = index
+            self._labels = set(labels)
+
+    def add(self, memory_id: int, vector: Sequence[float]) -> None:
+        label = int(memory_id)
+        row = self._matrix([vector])[0]
+        with self._lock:
+            if self._index is None:
+                self.build([label], [vector])
+                return
+            if label in self._labels:
+                self._index.remove(label, threads=1)
+            self._index.add(label, row, threads=1)
+            self._labels.add(label)
+
+    def remove(self, memory_id: int) -> bool:
+        label = int(memory_id)
+        with self._lock:
+            if self._index is None or label not in self._labels:
+                return False
+            removed = bool(self._index.remove(label, threads=1))
+            if removed:
+                self._labels.remove(label)
+            return removed
+
+    def search(self, query: Sequence[float], limit: int) -> list[VectorHit]:
+        if limit < 1:
+            return []
+        row = self._matrix([query])[0]
+        with self._lock:
+            if self._index is None or not self._labels:
+                return []
+            matches = self._index.search(
+                row, count=min(limit, len(self._labels)), threads=1
+            )
+            keys = list(matches.keys)
+            distances = list(matches.distances)
+        return [
+            VectorHit(int(label), max(-1.0, min(1.0, 1.0 - float(distance))))
+            for label, distance in zip(keys, distances, strict=True)
+        ]
+
+    def save(self, path: str | Path, *, source_fingerprint: str) -> None:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path = self.metadata_path(destination)
+        with self._lock:
+            if self._index is None:
+                raise RuntimeError("cannot save an index before build()")
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{destination.name}.", dir=destination.parent, delete=False
+            ) as handle:
+                temp_index = Path(handle.name)
+            temp_metadata = temp_index.with_suffix(temp_index.suffix + ".json")
+            try:
+                self._index.save(temp_index)
+                metadata = {
+                    "format_version": INDEX_FORMAT_VERSION,
+                    "engine": "usearch",
+                    "dimensions": self._dimensions,
+                    "count": len(self._labels),
+                    "labels": sorted(self._labels),
+                    "source_fingerprint": source_fingerprint,
+                    "index_sha256": _sha256(temp_index),
+                    "space": "cosine",
+                    "connectivity": self._connectivity,
+                    "expansion_add": self._expansion_add,
+                    "expansion_search": self._expansion_search,
+                }
+                temp_metadata.write_text(
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temp_index, destination)
+                os.replace(temp_metadata, metadata_path)
+            finally:
+                temp_index.unlink(missing_ok=True)
+                temp_metadata.unlink(missing_ok=True)
+
+    @classmethod
+    def load(
+        cls, path: str | Path, *, source_fingerprint: str
+    ) -> USearchMemoryIndex:
+        source = Path(path)
+        metadata_path = cls.metadata_path(source)
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise StaleVectorIndexError("missing or invalid USearch metadata") from exc
+        required = {
+            "format_version", "engine", "dimensions", "count", "labels",
+            "source_fingerprint", "index_sha256", "space", "connectivity",
+            "expansion_add", "expansion_search",
+        }
+        if not required.issubset(metadata):
+            raise StaleVectorIndexError("incomplete USearch metadata")
+        if metadata["format_version"] != INDEX_FORMAT_VERSION or metadata["engine"] != "usearch":
+            raise StaleVectorIndexError("unsupported USearch metadata version")
+        if metadata["source_fingerprint"] != source_fingerprint:
+            raise StaleVectorIndexError("USearch source fingerprint mismatch")
+        if metadata["space"] != "cosine":
+            raise StaleVectorIndexError("USearch distance-space mismatch")
+        try:
+            actual_sha = _sha256(source)
+        except OSError as exc:
+            raise StaleVectorIndexError("missing USearch index bytes") from exc
+        if actual_sha != metadata["index_sha256"]:
+            raise StaleVectorIndexError("USearch index checksum mismatch")
+        labels = [int(label) for label in metadata["labels"]]
+        if len(labels) != metadata["count"] or len(set(labels)) != len(labels):
+            raise StaleVectorIndexError("USearch label manifest is inconsistent")
+        instance = cls(
+            int(metadata["dimensions"]),
+            connectivity=int(metadata["connectivity"]),
+            expansion_add=int(metadata["expansion_add"]),
+            expansion_search=int(metadata["expansion_search"]),
+        )
+        try:
+            instance._index = instance._new_index()
+            instance._index.load(source)
+        except Exception as exc:
+            raise StaleVectorIndexError("USearch index bytes could not be loaded") from exc
+        instance._labels = set(labels)
+        return instance
+
+    @staticmethod
+    def metadata_path(path: str | Path) -> Path:
+        source = Path(path)
+        return source.with_name(source.name + ".json")
+
+
 def create_vector_index(
     dimensions: int,
     *,
-    prefer_hnsw: bool = True,
+    engine: str = "auto",
+    prefer_hnsw: bool | None = None,
     **hnsw_options: Any,
 ) -> VectorIndex:
-    """Choose HNSW when available; otherwise preserve exact-search behavior."""
-    if prefer_hnsw:
+    """Choose a portable ANN engine, or preserve exact-search correctness.
+
+    ``prefer_hnsw`` is retained for source compatibility with the 0.4.0
+    candidate API. New callers should use ``engine``.
+    """
+    if prefer_hnsw is False:
+        engine = "exact"
+    if engine not in {"auto", "usearch", "hnsw", "exact"}:
+        raise ValueError(f"unsupported vector index engine: {engine}")
+    if engine in {"auto", "usearch"}:
+        try:
+            return USearchMemoryIndex(dimensions)
+        except ImportError:
+            if engine == "usearch":
+                raise
+    if engine in {"auto", "hnsw"}:
         try:
             return HnswMemoryIndex(dimensions, **hnsw_options)
         except ImportError:
-            pass
+            if engine == "hnsw":
+                raise
     return ExactVectorIndex(dimensions)
