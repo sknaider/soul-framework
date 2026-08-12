@@ -38,6 +38,8 @@ soul snapshot Maya                                # compact view of the soul's s
 ```bash
 pip install soul-framework              # base: identity + memory + boot + reflect, SQLite, zero config
 pip install soul-framework[embeddings]  # add TRUE semantic memory search (sentence-transformers)
+pip install soul-framework[ann]         # add persistent HNSW search for large SQLite souls
+pip install soul-framework[integrity]   # add signed integrity checkpoints
 pip install soul-framework[postgres]    # add PostgreSQL + indexed pgvector storage
 ```
 
@@ -76,8 +78,57 @@ the nearest `memory_search_candidate_limit` vectors and then applies SOUL's
 importance/recency scoring; raise that limit when those secondary signals must
 consider a wider candidate set.
 
-The `soul` CLI intentionally remains the zero-config SQLite path in v0.3.0;
+The `soul` CLI intentionally remains the zero-config SQLite path in v0.4.0;
 PostgreSQL is configured through the Python API shown above.
+
+### Five-year SQLite path (local and sovereign)
+
+For a large local soul, BGE-M3 runs through the loopback-only Ollama API and
+HNSW avoids scanning every memory:
+
+```bash
+ollama pull bge-m3
+pip install 'soul-framework[ann]'
+```
+
+```python
+from soul_framework import Soul
+from soul_framework.config import SoulConfig
+
+config = SoulConfig(
+    backend_url="maya.db",
+    embedding_provider="bge-m3",
+    embedding_dimensions=1024,
+    memory_vector_index="hnsw",
+)
+
+async with Soul.create("Maya", config=config) as agent:
+    matches = await agent.memory.search(
+        "¿qué medicina debo evitar?",
+        context="Estoy revisando mis antecedentes médicos",
+    )
+```
+
+Existing 128-dimensional SQLite souls are migrated into a separate candidate;
+the source is never overwritten and the checkpoint supports resume/rollback:
+
+```bash
+python -m soul_framework.embedding_migration run maya.db \
+  --candidate maya.bge-m3.db --source-dim 128 --target-dim 1024 \
+  --provider bge-m3
+```
+
+The five-year engineering gate used 54,750 synthetic memories: all 8 fixed
+contextual anchors appeared in the top 5 (7/8 ranked first), and end-to-end
+retrieval measured 280 ms p50 on the test host. This validates the candidate path, not a universal "never
+forgets" claim; natural corpora and broader probes remain application gates.
+The HNSW sidecar is bound to the SQLite source fingerprint and is rebuilt
+fail-closed if stale or corrupt.
+
+Signed Ed25519 checkpoints are available through
+`soul_framework.integrity`. Strong rollback protection additionally requires
+an external monotonic witness; an in-process witness is useful for tests but is
+not a security boundary.
 
 ## What you get
 
@@ -120,7 +171,8 @@ remember who it is and what it learned?*
 
 ## Status
 
-Alpha (v0.3.0) — SQLite Core plus optional PostgreSQL/pgvector scale path. API may still shift before 1.0.
+Alpha (v0.4.0 candidate) — local BGE-M3 + HNSW + reversible embedding migration,
+with optional signed integrity checkpoints. API may still shift before 1.0.
 
 ## License
 
