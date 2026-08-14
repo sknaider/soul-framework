@@ -77,6 +77,10 @@ def test_usearch_round_trip_update_remove_and_fingerprint(tmp_path):
     loaded = USearchMemoryIndex.load(path, source_fingerprint="db-state-1")
     assert loaded.count == 3
     assert loaded.search([0.0, 1.0, 0.0], 2)[0].memory_id in {20, 30}
+    with pytest.raises(StaleVectorIndexError, match="canonical SQLite rows"):
+        USearchMemoryIndex.load(
+            path, source_fingerprint="db-state-1", expected_ids={10, 20, 30, 40}
+        )
     with pytest.raises(StaleVectorIndexError, match="fingerprint"):
         USearchMemoryIndex.load(path, source_fingerprint="different")
 
@@ -109,6 +113,11 @@ def test_hnsw_round_trip_and_source_fingerprint(tmp_path):
     assert loaded.remove(40) is True
     loaded.add(50, [0.0, 0.0, 1.0])
     assert loaded.search([0.0, 0.0, 1.0], 1)[0].memory_id == 50
+
+    with pytest.raises(StaleVectorIndexError, match="canonical SQLite rows"):
+        HnswMemoryIndex.load(
+            path, source_fingerprint="db-state-1", expected_ids={10, 20, 30}
+        )
 
     with pytest.raises(StaleVectorIndexError, match="fingerprint"):
         HnswMemoryIndex.load(path, source_fingerprint="different-db-state")

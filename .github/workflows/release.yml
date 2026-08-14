@@ -174,7 +174,7 @@ jobs:
       - name: Generate checksums
         run: |
           mkdir checksums
-          (cd dist && sha256sum *) > checksums/SHA256SUMS
+          sha256sum dist/* > checksums/SHA256SUMS
       - name: Upload distributions
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

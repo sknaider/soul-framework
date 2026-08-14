@@ -78,7 +78,7 @@ the nearest `memory_search_candidate_limit` vectors and then applies SOUL's
 importance/recency scoring; raise that limit when those secondary signals must
 consider a wider candidate set.
 
-The `soul` CLI intentionally remains the zero-config SQLite path in v0.4.2;
+The `soul` CLI intentionally remains the zero-config SQLite path in v0.4.3;
 PostgreSQL is configured through the Python API shown above.
 
 ### Five-year SQLite path (local and sovereign)
@@ -172,7 +172,7 @@ remember who it is and what it learned?*
 
 ## Status
 
-Alpha (v0.4.2) — local BGE-M3 + portable HNSW/USearch ANN + reversible embedding migration,
+Alpha (v0.4.3) — local BGE-M3 + portable HNSW/USearch ANN + reversible embedding migration,
 with optional signed integrity checkpoints. API may still shift before 1.0.
 
 ## License

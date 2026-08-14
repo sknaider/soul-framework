@@ -7,7 +7,6 @@ from pathlib import Path
 
 import soul_framework
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -17,6 +16,23 @@ def test_runtime_and_distribution_versions_match_project_metadata() -> None:
     )["project"]["version"]
     assert soul_framework.__version__ == project_version
     assert version("soul-framework") == project_version
+
+
+def test_sdist_has_explicit_public_allowlist() -> None:
+    """Local venvs and build outputs must never enter a source release."""
+    sdist_include = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    assert set(sdist_include) == {
+        "/.github/workflows/release.yml",
+        "/LICENSE",
+        "/README.md",
+        "/docs",
+        "/pyproject.toml",
+        "/src",
+        "/tests",
+    }
+    assert not any("venv" in path or "dist" in path for path in sdist_include)
 
 
 def test_public_source_has_no_internal_repository_path() -> None:

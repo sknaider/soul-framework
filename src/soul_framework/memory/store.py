@@ -200,6 +200,7 @@ class MemoryStore:
                     index_type.load,
                     self._vector_index_path,
                     source_fingerprint=fingerprint,
+                    expected_ids=ids,
                 )
             except StaleVectorIndexError:
                 await asyncio.to_thread(index.build, ids, vectors)
@@ -584,6 +585,25 @@ class MemoryStore:
                 "AND invalid_at IS NULL AND embedding IS NOT NULL ORDER BY id",
                 self._agent,
             )
+            # A process may have opened the same SQLite soul before another process
+            # committed a memory.  Its private ANN cache is then necessarily partial.
+            # Rebuild from the canonical rows immediately before publishing so the
+            # sidecar can never acquire a fresh DB fingerprint while omitting rows.
+            ids: list[int] = []
+            vectors: list[list[float]] = []
+            for row in rows:
+                data = row["embedding"]
+                if isinstance(data, memoryview):
+                    data = data.tobytes()
+                vector = _unpack_embedding(data)
+                if len(vector) != self._emb.dimensions:
+                    raise RuntimeError(
+                        "Stored embedding dimensions do not match the selected provider; "
+                        "run soul_framework.embedding_migration before activation"
+                    )
+                ids.append(int(row["id"]))
+                vectors.append(vector)
+            await asyncio.to_thread(self._vector_index.build, ids, vectors)
             await asyncio.to_thread(
                 self._vector_index.save,
                 self._vector_index_path,
