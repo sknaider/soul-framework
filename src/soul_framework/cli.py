@@ -33,7 +33,7 @@ def _version() -> str:
 
         return version("soul-framework")
     except Exception:
-        return "0.4.2"
+        return "0.4.3"
 
 
 def _slug(name: str) -> str:

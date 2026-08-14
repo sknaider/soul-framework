@@ -303,8 +303,9 @@ class HnswMemoryIndex:
         path: str | Path,
         *,
         source_fingerprint: str,
+        expected_ids: Iterable[int] | None = None,
     ) -> HnswMemoryIndex:
-        """Load only when bytes, dimensions and source fingerprint all match."""
+        """Load only when bytes, dimensions and canonical source rows all match."""
         source = Path(path)
         metadata_path = cls.metadata_path(source)
         try:
@@ -342,6 +343,10 @@ class HnswMemoryIndex:
         labels = [int(label) for label in metadata["labels"]]
         if len(labels) != metadata["count"] or len(set(labels)) != len(labels):
             raise StaleVectorIndexError("HNSW label manifest is inconsistent")
+        if expected_ids is not None and set(labels) != {
+            int(memory_id) for memory_id in expected_ids
+        }:
+            raise StaleVectorIndexError("HNSW labels do not match canonical SQLite rows")
         instance = cls(
             int(metadata["dimensions"]),
             m=int(metadata["m"]),
@@ -524,7 +529,11 @@ class USearchMemoryIndex:
 
     @classmethod
     def load(
-        cls, path: str | Path, *, source_fingerprint: str
+        cls,
+        path: str | Path,
+        *,
+        source_fingerprint: str,
+        expected_ids: Iterable[int] | None = None,
     ) -> USearchMemoryIndex:
         source = Path(path)
         metadata_path = cls.metadata_path(source)
@@ -554,6 +563,10 @@ class USearchMemoryIndex:
         labels = [int(label) for label in metadata["labels"]]
         if len(labels) != metadata["count"] or len(set(labels)) != len(labels):
             raise StaleVectorIndexError("USearch label manifest is inconsistent")
+        if expected_ids is not None and set(labels) != {
+            int(memory_id) for memory_id in expected_ids
+        }:
+            raise StaleVectorIndexError("USearch labels do not match canonical SQLite rows")
         instance = cls(
             int(metadata["dimensions"]),
             connectivity=int(metadata["connectivity"]),
