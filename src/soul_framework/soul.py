@@ -11,7 +11,12 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import time
 from collections.abc import Coroutine
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Self
 
 
@@ -57,6 +62,177 @@ from soul_framework.memory.store import MemoryStore
 from soul_framework.procedures.store import ProceduralStore
 from soul_framework.reflection.reflect import ReflectionManager
 from soul_framework.rules.manager import RuleManager
+
+
+class _DNIGatedBackend:
+    """Revalidate live DNI authority before every persistent DB operation."""
+
+    def __init__(self, backend: BackendBase, verifier: Any, verified: Any) -> None:
+        self._inner = backend
+        self._verifier = verifier
+        self._verified = verified
+        self._next_refresh = 0.0
+
+    @property
+    def url(self) -> str:
+        """Expose only the non-operational URL needed by the SQLite ANN cache.
+
+        A broad ``__getattr__`` proxy would let callers reach backend-specific
+        database operations without passing the live-DNI check.  Keep this
+        compatibility surface deliberately narrow instead.
+        """
+
+        return str(getattr(self._inner, "url", ""))
+
+    def _assert_live(self) -> None:
+        now = datetime.now(timezone.utc)
+        if now >= self._verified.expires_at or time.monotonic() >= self._next_refresh:
+            try:
+                refreshed = self._verifier()
+                if (
+                    refreshed.soul_dni != self._verified.soul_dni
+                    or refreshed.soul_id != self._verified.soul_id
+                    or refreshed.machine_soul_id != self._verified.machine_soul_id
+                ):
+                    raise ValueError("DNI renewal changed the sovereign identity")
+                if refreshed.sequence < self._verified.sequence:
+                    raise ValueError("DNI renewal sequence rolled back")
+                if refreshed.trust_sequence < self._verified.trust_sequence:
+                    raise ValueError("DNI trust sequence rolled back")
+                self._verified = refreshed
+            except Exception as exc:
+                raise PermissionError(
+                    "SOUL DNI renewal required; persistent Core is disconnected"
+                ) from exc
+            remaining = max(
+                0.0, (self._verified.expires_at - now).total_seconds()
+            )
+            self._next_refresh = time.monotonic() + min(300.0, remaining)
+
+    async def initialize(self) -> None:
+        self._assert_live()
+        try:
+            await self._inner.initialize()
+            from soul_framework.identity.binding import ensure_backend_identity_binding
+
+            await ensure_backend_identity_binding(self._inner, self._verified)
+        except BaseException:
+            await self._inner.close()
+            raise
+
+    async def execute(self, sql: str, *params: Any) -> None:
+        self._assert_live()
+        await self._inner.execute(sql, *params)
+
+    async def fetchone(self, sql: str, *params: Any) -> dict[str, Any] | None:
+        self._assert_live()
+        return await self._inner.fetchone(sql, *params)
+
+    async def fetchall(self, sql: str, *params: Any) -> list[dict[str, Any]]:
+        self._assert_live()
+        return await self._inner.fetchall(sql, *params)
+
+    async def fetchval(self, sql: str, *params: Any) -> Any:
+        self._assert_live()
+        return await self._inner.fetchval(sql, *params)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+
+class _DNIGatedPostgresBackend(_DNIGatedBackend):
+    """Preserve pgvector extensions without exposing an ungated backend."""
+
+    async def insert_memory_with_vector(
+        self, values: tuple[Any, ...], vector: list[float]
+    ) -> int:
+        self._assert_live()
+        return await self._inner.insert_memory_with_vector(values, vector)  # type: ignore[attr-defined]
+
+    async def update_memory_fields(
+        self,
+        memory_id: int,
+        agent: str,
+        changes: dict[str, Any],
+        vector: list[float] | None,
+    ) -> bool:
+        self._assert_live()
+        return await self._inner.update_memory_fields(  # type: ignore[attr-defined]
+            memory_id, agent, changes, vector
+        )
+
+    async def search_memory_vectors(
+        self,
+        agent: str,
+        vector: list[float],
+        *,
+        category: str = "",
+        min_importance: int = 0,
+        scope: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self._assert_live()
+        return await self._inner.search_memory_vectors(  # type: ignore[attr-defined]
+            agent,
+            vector,
+            category=category,
+            min_importance=min_importance,
+            scope=scope,
+            limit=limit,
+        )
+
+    async def insert_procedure_with_vector(
+        self, values: tuple[Any, ...], vector: list[float]
+    ) -> int:
+        self._assert_live()
+        return await self._inner.insert_procedure_with_vector(  # type: ignore[attr-defined]
+            values, vector
+        )
+
+    async def search_procedure_vectors(
+        self,
+        agent: str,
+        vector: list[float],
+        *,
+        task_type: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self._assert_live()
+        return await self._inner.search_procedure_vectors(  # type: ignore[attr-defined]
+            agent, vector, task_type=task_type, limit=limit
+        )
+
+
+class _DNIGatedIntegrityGuard:
+    """Apply the same live-DNI gate to direct integrity-guard I/O."""
+
+    def __init__(self, guard: Any, assert_live: Any) -> None:
+        self._inner = guard
+        self._assert_live = assert_live
+
+    def verify_before_serve(self) -> Any:
+        self._assert_live()
+        return self._inner.verify_before_serve()
+
+    def seal_and_publish(self) -> Any:
+        self._assert_live()
+        return self._inner.seal_and_publish()
+
+    def verified_fetchall(self, sql: str, *params: Any) -> Any:
+        self._assert_live()
+        return self._inner.verified_fetchall(sql, *params)
+
+    def verified_fetchone(self, sql: str, *params: Any) -> Any:
+        self._assert_live()
+        return self._inner.verified_fetchone(sql, *params)
+
+    def verified_fetchval(self, sql: str, *params: Any) -> Any:
+        self._assert_live()
+        return self._inner.verified_fetchval(sql, *params)
+
+    def mutate_and_publish(self, sql: str, *params: Any, **kwargs: Any) -> Any:
+        self._assert_live()
+        return self._inner.mutate_and_publish(sql, *params, **kwargs)
 
 
 class Soul:
@@ -139,6 +315,59 @@ class Soul:
         cfg = config or SoulConfig(backend=backend, backend_url=backend_url)
         backend_name = cfg.backend if config is not None else backend
         backend_dsn = cfg.backend_url if config is not None else backend_url
+        dni_verifier = None
+        verified_dni = None
+
+        # A durable DB is an embodied SOUL, not scratch state.  It may only
+        # open after SOUL's Identity Authority has issued a live DNI for this
+        # exact machine soul and OS owner.  In-memory instances remain useful
+        # for hermetic unit tests but cannot persist or impersonate an identity.
+        if backend_dsn:
+            from soul_framework.identity.dni import verify_soul_dni
+
+            # The SOUL installer exports these values for SDK/CLI callers
+            # that pass only a database path. Explicit config always wins.
+            cfg = replace(
+                cfg,
+                dni_credential_path=(
+                    cfg.dni_credential_path or os.environ.get("SOUL_DNI_CREDENTIAL", "")
+                ),
+                dni_trust_store_path=(
+                    cfg.dni_trust_store_path or os.environ.get("SOUL_DNI_TRUST_STORE", "")
+                ),
+                dni_trust_store_sha256=(
+                    cfg.dni_trust_store_sha256
+                    or os.environ.get("SOUL_DNI_TRUST_STORE_SHA256", "")
+                ),
+                machine_soul_id=(
+                    cfg.machine_soul_id or os.environ.get("SOUL_DNI_MACHINE_SOUL_ID", "")
+                ),
+            )
+
+            missing = [
+                field
+                for field, value in (
+                    ("dni_credential_path", cfg.dni_credential_path),
+                    ("dni_trust_store_path", cfg.dni_trust_store_path),
+                    ("dni_trust_store_sha256", cfg.dni_trust_store_sha256),
+                    ("machine_soul_id", cfg.machine_soul_id),
+                )
+                if not value
+            ]
+            if missing:
+                raise PermissionError(
+                    "persistent SOUL requires a SOUL-issued DNI: " + ", ".join(missing)
+                )
+            def dni_verifier():
+                return verify_soul_dni(
+                    cfg.dni_credential_path,
+                    cfg.dni_trust_store_path,
+                    expected_audience="soul-core",
+                    expected_machine_soul_id=cfg.machine_soul_id,
+                    expected_trust_store_sha256=cfg.dni_trust_store_sha256,
+                )
+
+            verified_dni = dni_verifier()
 
         # Resolve embedding first: pgvector needs its exact dimension at migration time.
         embedding_choice = (
@@ -184,15 +413,33 @@ class Soul:
             raise ValueError(
                 f"Unsupported backend: {backend_name}. Use 'sqlite' or 'postgres'."
             )
+        if integrity_guard is not None:
+            if backend_name != "sqlite":
+                raise ValueError(
+                    "SQLiteMemoryIntegrityGuard requires the sqlite backend"
+                )
+            guard_database = Path(integrity_guard.database).expanduser().resolve()
+            backend_database = Path(backend_dsn).expanduser().resolve()
+            if guard_database != backend_database or integrity_guard.agent != name:
+                raise ValueError(
+                    "integrity guard database and agent must match the gated SOUL"
+                )
+        if dni_verifier is not None and verified_dni is not None:
+            wrapper = (
+                _DNIGatedPostgresBackend
+                if backend_name == "postgres"
+                else _DNIGatedBackend
+            )
+            db = wrapper(db, dni_verifier, verified_dni)
+            if integrity_guard is not None:
+                integrity_guard = _DNIGatedIntegrityGuard(
+                    integrity_guard, db._assert_live
+                )
         await db.initialize()
         try:
             # Initialize LLM
             llm_inst = llm or StubProvider()
 
-            if integrity_guard is not None and backend_name != "sqlite":
-                raise ValueError(
-                    "SQLiteMemoryIntegrityGuard requires the sqlite backend"
-                )
             soul = cls(name, db, emb, llm_inst, cfg, integrity_guard)
             await soul._memory.verify_integrity()
             await soul._memory.initialize_vector_index()
@@ -321,8 +568,10 @@ class Soul:
 
     async def close(self) -> None:
         """Clean shutdown of backend connections."""
-        await self._memory.close()
-        await self._backend.close()
+        try:
+            await self._memory.close()
+        finally:
+            await self._backend.close()
 
     async def __aenter__(self) -> Self:
         return self
