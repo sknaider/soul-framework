@@ -45,6 +45,25 @@ pip install soul-framework[postgres]    # add PostgreSQL + indexed pgvector stor
 
 No database to set up — SQLite by default.
 
+### Windows: two official paths
+
+- **Complete EXE:** a self-contained installer for an offline-friendly first setup.
+- **PowerShell + uv:** installs the official `uv` binary, Python 3.13.15, and the
+  locked SOUL dependencies into a private per-user directory. It does not modify
+  system Python, the user `PATH`, Ollama, or its models. This path needs internet
+  during installation and does not depend on the custom SOUL installer EXE.
+
+Download `install-soul-core-uv.ps1` and `SHA256SUMS` from the
+[v0.4.3 release](https://github.com/sknaider/soul-framework/releases/tag/v0.4.3),
+verify the script hash listed there, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-soul-core-uv.ps1
+```
+
+Both paths preserve souls and memories under `%USERPROFILE%\.soul` when the
+application runtime is removed.
+
 ### PostgreSQL + pgvector
 
 For a larger persistent store, install both production extras and pass the DSN
