@@ -56,7 +56,7 @@ foreach ($Package in $Manifest.packages) {
 Copy-Item -LiteralPath $WheelhousePath -Destination (Join-Path $Payload "bootstrap\wheels") -Recurse
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "runtime-project") -Destination (Join-Path $Payload "project") -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $Payload "app") | Out-Null
-foreach ($Name in @("setup_soul.py", "doctor.py", "dependency_audit.py", "official_trust_keys.json")) {
+foreach ($Name in @("setup_soul.py", "doctor.py", "dependency_audit.py", "ann_probe.py", "official_trust_keys.json")) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot "installer\windows\$Name") -Destination (Join-Path $Payload "app\$Name")
 }
 Copy-Item -LiteralPath (Join-Path $RepoRoot "installer\windows\templates") -Destination (Join-Path $Payload "app\templates") -Recurse

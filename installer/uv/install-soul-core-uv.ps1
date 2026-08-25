@@ -17,12 +17,21 @@ $PythonVersion = "3.13.15"
 $PythonBuild = "20260825"
 $UvVersion = "0.12.6"
 $UvSha256 = "df7cb9f243eae1621400d4fcf5b1b3d90f20e264ece91b64deb3b0078abca6ef"
-$PayloadSha256 = "c68b305061762292ab8d87646739df1d770a534d44bc90bbffe2fa27343afb65"
+$PayloadSha256 = "3b6d0bdf183dab201e3b62fa4977393426b513fa34bf0ecbc0fd3887805b9f2b"
 $PythonArchiveSha256 = "c1dc1e267f2a81493ce6e94837263f648f1eb6d0df73a1492469c1fed025ce8f"
 $UvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
 $PayloadUrl = "https://github.com/sknaider/soul-framework/releases/download/v$Version/SOUL-Core-$Version-uv-payload.zip"
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("soul-core-uv-" + [guid]::NewGuid().ToString("N"))
+
+function Assert-SafeInstallRoot([string]$Path) {
+    $LocalRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd("\")
+    if (-not $Path.StartsWith($LocalRoot + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Por seguridad, el destino debe ser una subcarpeta de LOCALAPPDATA: $LocalRoot"
+    }
+}
+
+Assert-SafeInstallRoot $InstallRoot
 
 function Assert-Hash([string]$Path, [string]$Expected, [string]$Label) {
     $Observed = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -39,7 +48,7 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     $PreviousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $Program @Arguments
+        & $Program @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
         $NativeExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $PreviousErrorAction
@@ -70,6 +79,26 @@ function New-SoulShortcut([string]$Path, [string]$Target, [string]$WorkingDirect
     $Shortcut.TargetPath = $Target
     $Shortcut.WorkingDirectory = $WorkingDirectory
     $Shortcut.Save()
+}
+
+function Install-AppLocalMsvcRuntime([string]$PythonHome, [string]$EnvironmentDir) {
+    # No requiere el instalador global VC++: usa los runtimes ya contenidos en
+    # el Python bloqueado y en el wheel verificado de scikit-learn.
+    $TorchLib = Join-Path $EnvironmentDir "Lib\site-packages\torch\lib"
+    $RuntimeFiles = @(
+        (Join-Path $PythonHome "vcruntime140.dll"),
+        (Join-Path $PythonHome "vcruntime140_1.dll"),
+        (Join-Path $EnvironmentDir "Lib\site-packages\sklearn\.libs\msvcp140.dll")
+    )
+    if (-not (Test-Path -LiteralPath $TorchLib -PathType Container)) {
+        throw "No se encontro el directorio nativo de Torch: $TorchLib"
+    }
+    foreach ($RuntimeFile in $RuntimeFiles) {
+        if (-not (Test-Path -LiteralPath $RuntimeFile -PathType Leaf)) {
+            throw "Falta una dependencia MSVC bloqueada: $RuntimeFile"
+        }
+        Copy-Item -LiteralPath $RuntimeFile -Destination $TorchLib -Force
+    }
 }
 
 try {
@@ -192,6 +221,33 @@ try {
     }
     Invoke-Checked $Uv @("pip", "install", "--python", $RuntimePython, "--offline", "--no-cache", "--no-index", "--find-links", $Wheelhouse, "--require-hashes", "--no-deps", "--requirements", $WindowsRequirements)
     Invoke-Checked $Uv @("pip", "check", "--python", $RuntimePython)
+    Install-AppLocalMsvcRuntime (Split-Path -Parent $BundledPython) $RuntimeDir
+
+    Write-Host "[5/7] Probando el motor ANN nativo en un proceso aislado..."
+    $ProbeScript = Join-Path $InstallRoot "app\ann_probe.py"
+    $ProbeStdout = Join-Path $InstallRoot "ann-probe.stdout.log"
+    $ProbeStderr = Join-Path $InstallRoot "ann-probe.stderr.log"
+    $Probe = Start-Process -FilePath $RuntimePython -ArgumentList "-X faulthandler `"$ProbeScript`"" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $ProbeStdout -RedirectStandardError $ProbeStderr
+    $AnnState = [ordered]@{
+        schema = "soul.core.ann-state.v1"
+        probe_exit_code = $Probe.ExitCode
+        selected_engine = "usearch"
+        quarantine_path = ""
+    }
+    if ($Probe.ExitCode -ne 0) {
+        $UsearchDir = Join-Path $RuntimeDir "Lib\site-packages\usearch"
+        $QuarantineRoot = Join-Path $InstallRoot "quarantine"
+        $QuarantineDir = Join-Path $QuarantineRoot ("usearch-" + [guid]::NewGuid().ToString("N"))
+        if (-not (Test-Path -LiteralPath $UsearchDir -PathType Container)) {
+            throw "El probe ANN fallo y no se encontro el modulo que debe aislarse."
+        }
+        New-Item -ItemType Directory -Force -Path $QuarantineRoot | Out-Null
+        Move-Item -LiteralPath $UsearchDir -Destination $QuarantineDir
+        $AnnState.selected_engine = "exact"
+        $AnnState.quarantine_path = $QuarantineDir
+        Write-Warning "USearch no es compatible con este CPU/VM; SOUL usara el indice exacto seguro."
+    }
+    $AnnState | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstallRoot "ann-state.json") -Encoding UTF8
     Write-Host "[6/7] Auditando imports y versiones reales..."
     Invoke-Checked $RuntimePython @((Join-Path $InstallRoot "app\dependency_audit.py"))
     Invoke-Checked $RuntimePython @("-m", "soul_framework.cli", "--version")
@@ -206,6 +262,8 @@ try {
         uv_version = $UvVersion
         uv_sha256 = $UvSha256
         payload_sha256 = $PayloadSha256
+        ann_engine = $AnnState.selected_engine
+        ann_probe_exit_code = $AnnState.probe_exit_code
         installed_at = [DateTime]::UtcNow.ToString("o")
     }
     $State | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
