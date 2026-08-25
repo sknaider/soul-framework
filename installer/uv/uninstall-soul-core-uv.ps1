@@ -8,6 +8,11 @@ $ErrorActionPreference = "Stop"
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $StateFile = Join-Path $InstallRoot "install-state.json"
 
+$LocalRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd("\")
+if (-not $InstallRoot.StartsWith($LocalRoot + "\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Por seguridad, solo se desinstalan subcarpetas de LOCALAPPDATA: $LocalRoot"
+}
+
 if (-not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
     throw "No se encontro una instalacion administrada de SOUL Core UV en: $InstallRoot"
 }
@@ -37,6 +42,10 @@ if ($KeepCache) {
     if (Test-Path -LiteralPath $SavedCache) {
         Move-Item -LiteralPath $SavedCache -Destination $Cache
     }
+    [ordered]@{
+        schema = "soul.core.uv-owner.v1"
+        install_root = $InstallRoot
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstallRoot "install-owner.json") -Encoding UTF8
 } else {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
 }

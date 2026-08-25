@@ -14,13 +14,25 @@ $ProgressPreference = "SilentlyContinue"
 
 $Version = "0.4.3"
 $PythonVersion = "3.13.15"
+$PythonBuild = "20260825"
 $UvVersion = "0.12.6"
 $UvSha256 = "df7cb9f243eae1621400d4fcf5b1b3d90f20e264ece91b64deb3b0078abca6ef"
-$PayloadSha256 = "1adc43c68bcae6e6e0969dc728f77be17f7ec2e0600e29e1f9458d3e3825146f"
+$PayloadSha256 = "2d8958dc25b5030f02e47530f44922f28565361f94c241566f32e0aafad398e5"
+$PythonArchiveSha256 = "c1dc1e267f2a81493ce6e94837263f648f1eb6d0df73a1492469c1fed025ce8f"
 $UvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
 $PayloadUrl = "https://github.com/sknaider/soul-framework/releases/download/v$Version/SOUL-Core-$Version-uv-payload.zip"
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("soul-core-uv-" + [guid]::NewGuid().ToString("N"))
+
+function Assert-SafeInstallRoot([string]$Path) {
+    $LocalRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd("\")
+    $RequiredPrefix = $LocalRoot + "\"
+    if (-not $Path.StartsWith($RequiredPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Por seguridad, el destino debe ser una subcarpeta de LOCALAPPDATA: $LocalRoot"
+    }
+}
+
+Assert-SafeInstallRoot $InstallRoot
 
 function Assert-Hash([string]$Path, [string]$Expected, [string]$Label) {
     $Observed = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -31,10 +43,41 @@ function Assert-Hash([string]$Path, [string]$Expected, [string]$Label) {
 }
 
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
-    & $Program @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Program termino con codigo $LASTEXITCODE"
+    # Windows PowerShell 5.1 promotes every native stderr line to an error
+    # record. uv writes download progress to stderr even on success, so keep
+    # native output visible but decide success exclusively from the exit code.
+    $PreviousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Program @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorAction
     }
+    if ($NativeExitCode -ne 0) {
+        throw "$Program termino con codigo $NativeExitCode"
+    }
+}
+
+function Invoke-CheckedRetry([string]$Program, [string[]]$Arguments, [int]$Attempts = 2) {
+    for ($Attempt = 1; $Attempt -le $Attempts; $Attempt++) {
+        $PreviousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $Program @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+            $NativeExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $PreviousErrorAction
+        }
+        if ($NativeExitCode -eq 0) {
+            return
+        }
+        if ($Attempt -lt $Attempts) {
+            Write-Warning "Descarga incompleta (intento $Attempt/$Attempts). Reintentando sin borrar la cache..."
+            Start-Sleep -Seconds 2
+        }
+    }
+    throw "$Program termino con codigo $NativeExitCode despues de $Attempts intentos"
 }
 
 function New-SoulShortcut([string]$Path, [string]$Target, [string]$WorkingDirectory) {
@@ -43,6 +86,27 @@ function New-SoulShortcut([string]$Path, [string]$Target, [string]$WorkingDirect
     $Shortcut.TargetPath = $Target
     $Shortcut.WorkingDirectory = $WorkingDirectory
     $Shortcut.Save()
+}
+
+function Install-AppLocalMsvcRuntime([string]$PythonHome, [string]$EnvironmentDir) {
+    # Torch for Windows requires the MSVC runtime. Keep it app-local: the
+    # locked Python runtime provides vcruntime and scikit-learn provides
+    # msvcp140.dll, so no global VC++ installer or administrator rights.
+    $TorchLib = Join-Path $EnvironmentDir "Lib\site-packages\torch\lib"
+    $RuntimeFiles = @(
+        (Join-Path $PythonHome "vcruntime140.dll"),
+        (Join-Path $PythonHome "vcruntime140_1.dll"),
+        (Join-Path $EnvironmentDir "Lib\site-packages\sklearn\.libs\msvcp140.dll")
+    )
+    if (-not (Test-Path -LiteralPath $TorchLib -PathType Container)) {
+        throw "No se encontro el directorio nativo de Torch: $TorchLib"
+    }
+    foreach ($RuntimeFile in $RuntimeFiles) {
+        if (-not (Test-Path -LiteralPath $RuntimeFile -PathType Leaf)) {
+            throw "Falta una dependencia MSVC bloqueada: $RuntimeFile"
+        }
+        Copy-Item -LiteralPath $RuntimeFile -Destination $TorchLib -Force
+    }
 }
 
 try {
@@ -80,17 +144,43 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage "project\uv.lock") -PathType Leaf)) {
         throw "El payload no contiene project\uv.lock."
     }
+    $PythonArchive = Join-Path $Stage "bootstrap\cpython-$PythonVersion+$PythonBuild-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+    if (-not (Test-Path -LiteralPath $PythonArchive -PathType Leaf)) {
+        throw "El payload no contiene el runtime privado de Python."
+    }
+    Assert-Hash $PythonArchive $PythonArchiveSha256 "Python de Astral"
 
     $StateFile = Join-Path $InstallRoot "install-state.json"
-    if ((Test-Path -LiteralPath $InstallRoot) -and -not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+    $OwnerFile = Join-Path $InstallRoot "install-owner.json"
+    if (Test-Path -LiteralPath $InstallRoot) {
         $Children = @(Get-ChildItem -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue)
         if ($Children.Count -gt 0) {
-            throw "El destino existe y no pertenece al instalador SOUL Core UV: $InstallRoot"
+            $Managed = $false
+            foreach ($Marker in @($StateFile, $OwnerFile)) {
+                if (Test-Path -LiteralPath $Marker -PathType Leaf) {
+                    try {
+                        $Metadata = Get-Content -LiteralPath $Marker -Raw | ConvertFrom-Json
+                        $Managed = $Managed -or (
+                            $Metadata.install_root -eq $InstallRoot -and
+                            $Metadata.schema -in @("soul.core.uv-install.v1", "soul.core.uv-owner.v1")
+                        )
+                    } catch {
+                        continue
+                    }
+                }
+            }
+            if (-not $Managed) {
+                throw "El destino existe y no pertenece al instalador SOUL Core UV: $InstallRoot"
+            }
         }
     }
 
     Write-Host "[3/7] Copiando componentes verificados..."
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+    [ordered]@{
+        schema = "soul.core.uv-owner.v1"
+        install_root = $InstallRoot
+    } | ConvertTo-Json | Set-Content -LiteralPath $OwnerFile -Encoding UTF8
     Get-ChildItem -LiteralPath $Stage -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $InstallRoot -Recurse -Force
     }
@@ -107,13 +197,30 @@ try {
     $env:UV_CACHE_DIR = $CacheDir
     $env:UV_PYTHON_NO_REGISTRY = "1"
     $env:UV_PROJECT_ENVIRONMENT = $RuntimeDir
+    $env:UV_CONCURRENT_DOWNLOADS = "4"
+    $env:UV_CONCURRENT_INSTALLS = "2"
+    $env:UV_HTTP_CONNECT_TIMEOUT = "30"
+    $env:UV_HTTP_RETRIES = "5"
+    $env:UV_HTTP_TIMEOUT = "120"
     $env:PYTHONUTF8 = "1"
 
-    Write-Host "[4/7] Instalando Python privado $PythonVersion..."
-    Invoke-Checked $Uv @("python", "install", $PythonVersion, "--install-dir", $PythonDir, "--no-bin", "--no-registry", "--system-certs")
+    Write-Host "[4/7] Preparando Python privado $PythonVersion..."
+    New-Item -ItemType Directory -Force -Path $PythonDir | Out-Null
+    $Tar = (Get-Command "tar.exe" -ErrorAction SilentlyContinue).Source
+    if (-not $Tar) {
+        throw "Windows no incluye tar.exe; se requiere Windows 10 1803 o superior."
+    }
+    Invoke-Checked $Tar @("-xzf", $PythonArchive, "-C", $PythonDir)
+    $BundledPython = Join-Path $PythonDir "python\python.exe"
+    if (-not (Test-Path -LiteralPath $BundledPython -PathType Leaf)) {
+        throw "No aparecio el Python privado esperado: $BundledPython"
+    }
+    Invoke-Checked $BundledPython @("--version")
 
     Write-Host "[5/7] Instalando dependencias bloqueadas por uv.lock..."
-    Invoke-Checked $Uv @("sync", "--project", $ProjectDir, "--locked", "--no-dev", "--python", $PythonVersion, "--managed-python", "--system-certs")
+    Invoke-CheckedRetry $Uv @("sync", "--project", $ProjectDir, "--locked", "--no-dev", "--python", $BundledPython, "--no-managed-python", "--system-certs")
+
+    Install-AppLocalMsvcRuntime (Split-Path -Parent $BundledPython) $RuntimeDir
 
     $RuntimePython = Join-Path $RuntimeDir "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
@@ -128,6 +235,8 @@ try {
         version = $Version
         install_root = $InstallRoot
         python_version = $PythonVersion
+        python_build = $PythonBuild
+        python_archive_sha256 = $PythonArchiveSha256
         uv_version = $UvVersion
         uv_sha256 = $UvSha256
         payload_sha256 = $PayloadSha256

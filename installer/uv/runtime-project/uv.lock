@@ -430,18 +430,6 @@ wheels = [
 ]
 
 [[package]]
-name = "numkong"
-version = "7.8.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8e/a2/8fd62336791ef3e436d71bb11f3693e10dea55fe5f0b23cdfdb1ab180222/numkong-7.8.1.tar.gz", hash = "sha256:59c5da813222a4e8fc17d3b650524716d851eb7fc71127933e8bafcdc058dbab", size = 1197914, upload-time = "2026-08-22T21:59:02.049Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/31/f9746a9b9f217e5b88f06d0e435fb52af0a27204ed7223f00f6124a0efad/numkong-7.8.1-cp313-cp313-win_amd64.whl", hash = "sha256:849e33c594e84061cad4e9a47162d3e025fc1401f0e342949d915dbab26c7706", size = 492365, upload-time = "2026-08-22T21:57:36.559Z" },
-    { url = "https://files.pythonhosted.org/packages/2a/ee/79e96b5975fa415d552d3dd45786e1949fa8d438dcd337f3b11e15229566/numkong-7.8.1-cp313-cp313-win_arm64.whl", hash = "sha256:e4a7f2991bfd428b6b7249c1e6ad1a7e38354073252a91ea97ccccefa60efcb2", size = 431370, upload-time = "2026-08-22T21:57:38.091Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/a6/51b4e4fc3ad4efc11b05c87fea53125811fe9027796dcd56445e32e64922/numkong-7.8.1-cp313-cp313t-win_amd64.whl", hash = "sha256:83584c61d89875880c253d995691910d8d299755512f427baa707d814176f9cc", size = 494611, upload-time = "2026-08-22T21:58:03.11Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/cc/0c607bf5acd04c71bc29d6d7d014c4b48d00ddd5c533446cb4cf98adf582/numkong-7.8.1-cp313-cp313t-win_arm64.whl", hash = "sha256:cabe66bd6e472876b28627c210356c73b8036178cf6d193a081adfdeca8ee238", size = 432769, upload-time = "2026-08-22T21:58:04.512Z" },
-]
-
-[[package]]
 name = "numpy"
 version = "2.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -833,15 +821,31 @@ wheels = [
 ]
 
 [[package]]
+name = "simsimd"
+version = "6.5.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/8c/070a179eb509b689509dacbd0bc81aa2e36614aff2c8aa6dc6c440886206/simsimd-6.5.16.tar.gz", hash = "sha256:0a005c6e2dacec83f235a747f7dbecca46b5d4d1e183ecc1929ca556ee7d7564", size = 187216, upload-time = "2026-03-07T14:36:23.191Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/54/dbc23d585a57c9b0e71ab10705c4121ce91a807df374d433dd86fb438caa/simsimd-6.5.16-cp313-cp313-win_amd64.whl", hash = "sha256:fe7a0fa49b09651cc1721f5928fa68665f4957c492937241bbdd6ed040dc4a5d", size = 87460, upload-time = "2026-03-07T14:35:13.948Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/3c/62a41c182ab6f7abfbfe8941fa12d08b8235b4498e988e5d1f29ac21504f/simsimd-6.5.16-cp313-cp313-win_arm64.whl", hash = "sha256:3fc01992b9d3be84d4826c0d9f8a894668ad931285c09f74bdbe61a5400c9f4d", size = 62922, upload-time = "2026-03-07T14:35:15.252Z" },
+    { url = "https://files.pythonhosted.org/packages/54/0d/b74a391fefe7d349230b58b1d0fe6d401d1625553b5375a99608f9d228a9/simsimd-6.5.16-cp313-cp313t-win_amd64.whl", hash = "sha256:01ef2ff8cf99fc3a8e23fb2cadc06b6aa4df9b5e6d001b184d42cf403b1cdc16", size = 87630, upload-time = "2026-03-07T14:35:26.598Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/ac/004dc381de9ac6634c785d0284dba8d1f12018584ddd992c09d9f85454b9/simsimd-6.5.16-cp313-cp313t-win_arm64.whl", hash = "sha256:a152c559298bae402ed8205b604e5b0418a2ce8a61a6a87f14973e53b68d5f6a", size = 63126, upload-time = "2026-03-07T14:35:28.295Z" },
+]
+
+[[package]]
 name = "soul-core-runtime"
 version = "0.4.3"
 source = { virtual = "." }
 dependencies = [
     { name = "soul-framework", extra = ["all"] },
+    { name = "usearch", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "soul-framework", extras = ["all"], specifier = "==0.4.3" }]
+requires-dist = [
+    { name = "soul-framework", extras = ["all"], specifier = "==0.4.3" },
+    { name = "usearch", marker = "sys_platform == 'win32'", specifier = "==2.16.4" },
+]
 
 [[package]]
 name = "soul-framework"
@@ -1009,14 +1013,14 @@ wheels = [
 
 [[package]]
 name = "usearch"
-version = "2.26.1"
+version = "2.16.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numkong" },
     { name = "numpy" },
+    { name = "simsimd" },
     { name = "tqdm" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/f2/938a400c69e9b1d5694a40f09ced516c048a82021b75c42c3707d7810f1c/usearch-2.26.1-cp313-cp313-win_amd64.whl", hash = "sha256:b9b062730ec41ca6bbf3084785fe1a17fde7b20c26d9bc255cbacd627dd4db5c", size = 351158, upload-time = "2026-08-22T20:10:14.356Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/60/b65afc17bee924e977ab8e696ccf9fa8f97b3c13564e6c1a91e076c40232/usearch-2.26.1-cp313-cp313-win_arm64.whl", hash = "sha256:eec86c9fc03b1a8f825b13754ae302a5bc1a5fb4a35d7b135f2219adc6dd2f30", size = 347947, upload-time = "2026-08-22T20:10:15.875Z" },
+    { url = "https://files.pythonhosted.org/packages/11/7c/6c7f0e9f6bcad6db756f05704afec45dbe3d098be9220219aa53949c1553/usearch-2.16.4-cp313-cp313-win_amd64.whl", hash = "sha256:45c506ac0af64a761fb0d029e0eb0ec3ee5ccf481bc78bffe6240659a1f1c3b8", size = 292524, upload-time = "2024-11-19T09:55:19.333Z" },
+    { url = "https://files.pythonhosted.org/packages/38/2a/995b079a25ca8f84feed2819d69fc27d216512e81f727b2302bb87945406/usearch-2.16.4-cp313-cp313-win_arm64.whl", hash = "sha256:5503ee0b3352c29b642e79b75881452694e18dc1788c6f703faa273012e1c5e3", size = 276703, upload-time = "2024-11-19T09:55:21.392Z" },
 ]

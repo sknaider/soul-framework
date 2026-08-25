@@ -48,7 +48,8 @@ No database to set up — SQLite by default.
 ### Windows: two official paths
 
 - **Complete EXE:** a self-contained installer for an offline-friendly first setup.
-- **PowerShell + uv:** installs the official `uv` binary, Python 3.13.15, and the
+- **PowerShell + uv:** installs the official `uv` binary, a bundled private
+  Python 3.13.15 runtime, and the
   locked SOUL dependencies into a private per-user directory. It does not modify
   system Python, the user `PATH`, Ollama, or its models. This path needs internet
   during installation and does not depend on the custom SOUL installer EXE.

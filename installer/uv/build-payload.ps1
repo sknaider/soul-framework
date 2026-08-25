@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.4.3"
+    [string]$Version = "0.4.3",
+    [string]$PythonVersion = "3.13.15",
+    [string]$PythonBuild = "20260825",
+    [string]$PythonArchivePath = "",
+    [string]$PythonSha256 = "c1dc1e267f2a81493ce6e94837263f648f1eb6d0df73a1492469c1fed025ce8f"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,11 +13,25 @@ $BuildRoot = Join-Path $RepoRoot "build\uv-installer"
 $Payload = Join-Path $BuildRoot "payload"
 $DistDir = Join-Path $RepoRoot "dist\uv"
 $Archive = Join-Path $DistDir "SOUL-Core-$Version-uv-payload.zip"
+$PythonArchiveName = "cpython-$PythonVersion+$PythonBuild-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+$PythonUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$PythonBuild/cpython-$PythonVersion%2B$PythonBuild-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
 
 if (Test-Path -LiteralPath $BuildRoot) {
     Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $Payload, $DistDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $Payload "bootstrap") | Out-Null
+$BundledPythonArchive = Join-Path $Payload "bootstrap\$PythonArchiveName"
+if ($PythonArchivePath) {
+    Copy-Item -LiteralPath $PythonArchivePath -Destination $BundledPythonArchive
+} else {
+    Write-Host "Descargando Python privado oficial de Astral..."
+    Invoke-WebRequest -UseBasicParsing -Uri $PythonUrl -OutFile $BundledPythonArchive
+}
+$ObservedPythonSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $BundledPythonArchive).Hash.ToLowerInvariant()
+if ($ObservedPythonSha256 -ne $PythonSha256.ToLowerInvariant()) {
+    throw "SHA-256 inesperado para Python privado: $ObservedPythonSha256"
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "runtime-project") -Destination (Join-Path $Payload "project") -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $Payload "app") | Out-Null
 foreach ($Name in @("setup_soul.py", "doctor.py", "dependency_audit.py", "official_trust_keys.json")) {
