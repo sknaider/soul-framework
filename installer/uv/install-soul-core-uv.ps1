@@ -14,9 +14,11 @@ $ProgressPreference = "SilentlyContinue"
 
 $Version = "0.4.3"
 $PythonVersion = "3.13.15"
+$PythonBuild = "20260825"
 $UvVersion = "0.12.6"
 $UvSha256 = "df7cb9f243eae1621400d4fcf5b1b3d90f20e264ece91b64deb3b0078abca6ef"
-$PayloadSha256 = "1adc43c68bcae6e6e0969dc728f77be17f7ec2e0600e29e1f9458d3e3825146f"
+$PayloadSha256 = "c68b305061762292ab8d87646739df1d770a534d44bc90bbffe2fa27343afb65"
+$PythonArchiveSha256 = "c1dc1e267f2a81493ce6e94837263f648f1eb6d0df73a1492469c1fed025ce8f"
 $UvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
 $PayloadUrl = "https://github.com/sknaider/soul-framework/releases/download/v$Version/SOUL-Core-$Version-uv-payload.zip"
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
@@ -31,9 +33,34 @@ function Assert-Hash([string]$Path, [string]$Expected, [string]$Label) {
 }
 
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
-    & $Program @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Program termino con codigo $LASTEXITCODE"
+    # Windows PowerShell 5.1 promotes every native stderr line to an error
+    # record. uv writes download progress to stderr even on success, so keep
+    # native output visible but decide success exclusively from the exit code.
+    $PreviousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Program @Arguments
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorAction
+    }
+    if ($NativeExitCode -ne 0) {
+        throw "$Program termino con codigo $NativeExitCode"
+    }
+}
+
+function Invoke-Download([string]$Url, [string]$Destination, [string]$Label) {
+    for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+            return
+        } catch {
+            if ($Attempt -eq 3) {
+                throw
+            }
+            Write-Warning "$Label no termino de descargar (intento $Attempt/3). Reintentando..."
+            Start-Sleep -Seconds 2
+        }
     }
 }
 
@@ -61,7 +88,7 @@ try {
         Copy-Item -LiteralPath $UvArchivePath -Destination $UvArchive
     } else {
         Write-Host "[1/7] Descargando uv $UvVersion desde Astral..."
-        Invoke-WebRequest -UseBasicParsing -Uri $UvUrl -OutFile $UvArchive
+        Invoke-Download $UvUrl $UvArchive "uv"
     }
     Assert-Hash $UvArchive $UvSha256 "uv oficial"
 
@@ -69,7 +96,7 @@ try {
         Copy-Item -LiteralPath $PayloadPath -Destination $PayloadArchive
     } else {
         Write-Host "[2/7] Descargando payload oficial de SOUL Core..."
-        Invoke-WebRequest -UseBasicParsing -Uri $PayloadUrl -OutFile $PayloadArchive
+        Invoke-Download $PayloadUrl $PayloadArchive "payload de SOUL Core"
     }
     Assert-Hash $PayloadArchive $PayloadSha256 "payload de SOUL Core"
 
@@ -80,18 +107,52 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $Stage "project\uv.lock") -PathType Leaf)) {
         throw "El payload no contiene project\uv.lock."
     }
+    $PythonArchive = Join-Path $Stage "bootstrap\cpython-$PythonVersion+$PythonBuild-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+    if (-not (Test-Path -LiteralPath $PythonArchive -PathType Leaf)) {
+        throw "El payload no contiene el runtime privado de Python."
+    }
+    Assert-Hash $PythonArchive $PythonArchiveSha256 "Python de Astral"
+    $Wheelhouse = Join-Path $Stage "bootstrap\wheels"
+    if (-not (Test-Path -LiteralPath (Join-Path $Wheelhouse "WHEELHOUSE-MANIFEST.json") -PathType Leaf)) {
+        throw "El payload no contiene el wheelhouse bloqueado de Windows."
+    }
+    $WindowsRequirements = Join-Path $Wheelhouse "requirements-windows-x64.txt"
+    if (-not (Test-Path -LiteralPath $WindowsRequirements -PathType Leaf)) {
+        throw "El payload no contiene los requisitos Windows bloqueados."
+    }
 
     $StateFile = Join-Path $InstallRoot "install-state.json"
-    if ((Test-Path -LiteralPath $InstallRoot) -and -not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+    $OwnerFile = Join-Path $InstallRoot "install-owner.json"
+    if (Test-Path -LiteralPath $InstallRoot) {
         $Children = @(Get-ChildItem -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue)
         if ($Children.Count -gt 0) {
-            throw "El destino existe y no pertenece al instalador SOUL Core UV: $InstallRoot"
+            $Managed = $false
+            foreach ($Marker in @($StateFile, $OwnerFile)) {
+                if (Test-Path -LiteralPath $Marker -PathType Leaf) {
+                    try {
+                        $Metadata = Get-Content -LiteralPath $Marker -Raw | ConvertFrom-Json
+                        $Managed = $Managed -or (
+                            $Metadata.install_root -eq $InstallRoot -and
+                            $Metadata.schema -in @("soul.core.uv-install.v1", "soul.core.uv-owner.v1")
+                        )
+                    } catch {
+                        continue
+                    }
+                }
+            }
+            if (-not $Managed) {
+                throw "El destino existe y no pertenece al instalador SOUL Core UV: $InstallRoot"
+            }
         }
     }
 
     Write-Host "[3/7] Copiando componentes verificados..."
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
-    Get-ChildItem -LiteralPath $Stage -Force | ForEach-Object {
+    [ordered]@{
+        schema = "soul.core.uv-owner.v1"
+        install_root = $InstallRoot
+    } | ConvertTo-Json | Set-Content -LiteralPath $OwnerFile -Encoding UTF8
+    Get-ChildItem -LiteralPath $Stage -Force | Where-Object { $_.Name -ne "bootstrap" } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $InstallRoot -Recurse -Force
     }
     $ToolsDir = Join-Path $InstallRoot "tools"
@@ -109,16 +170,28 @@ try {
     $env:UV_PROJECT_ENVIRONMENT = $RuntimeDir
     $env:PYTHONUTF8 = "1"
 
-    Write-Host "[4/7] Instalando Python privado $PythonVersion..."
-    Invoke-Checked $Uv @("python", "install", $PythonVersion, "--install-dir", $PythonDir, "--no-bin", "--no-registry", "--system-certs")
+    Write-Host "[4/7] Preparando Python privado $PythonVersion..."
+    New-Item -ItemType Directory -Force -Path $PythonDir | Out-Null
+    $Tar = (Get-Command "tar.exe" -ErrorAction SilentlyContinue).Source
+    if (-not $Tar) {
+        throw "Windows no incluye tar.exe; se requiere Windows 10 1803 o superior."
+    }
+    Invoke-Checked $Tar @("-xzf", $PythonArchive, "-C", $PythonDir)
+    $BundledPython = Join-Path $PythonDir "python\python.exe"
+    if (-not (Test-Path -LiteralPath $BundledPython -PathType Leaf)) {
+        throw "No aparecio el Python privado esperado: $BundledPython"
+    }
+    Invoke-Checked $BundledPython @("--version")
 
-    Write-Host "[5/7] Instalando dependencias bloqueadas por uv.lock..."
-    Invoke-Checked $Uv @("sync", "--project", $ProjectDir, "--locked", "--no-dev", "--python", $PythonVersion, "--managed-python", "--system-certs")
+    Write-Host "[5/7] Instalando dependencias locales bloqueadas por uv.lock..."
+    Invoke-Checked $Uv @("venv", $RuntimeDir, "--python", $BundledPython, "--no-managed-python", "--allow-existing")
 
     $RuntimePython = Join-Path $RuntimeDir "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
         throw "No aparecio el Python privado esperado: $RuntimePython"
     }
+    Invoke-Checked $Uv @("pip", "install", "--python", $RuntimePython, "--offline", "--no-cache", "--no-index", "--find-links", $Wheelhouse, "--require-hashes", "--no-deps", "--requirements", $WindowsRequirements)
+    Invoke-Checked $Uv @("pip", "check", "--python", $RuntimePython)
     Write-Host "[6/7] Auditando imports y versiones reales..."
     Invoke-Checked $RuntimePython @((Join-Path $InstallRoot "app\dependency_audit.py"))
     Invoke-Checked $RuntimePython @("-m", "soul_framework.cli", "--version")
@@ -128,12 +201,19 @@ try {
         version = $Version
         install_root = $InstallRoot
         python_version = $PythonVersion
+        python_build = $PythonBuild
+        python_archive_sha256 = $PythonArchiveSha256
         uv_version = $UvVersion
         uv_sha256 = $UvSha256
         payload_sha256 = $PayloadSha256
         installed_at = [DateTime]::UtcNow.ToString("o")
     }
     $State | ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding UTF8
+    foreach ($Transient in @((Join-Path $InstallRoot "bootstrap"), $CacheDir)) {
+        if (Test-Path -LiteralPath $Transient) {
+            Remove-Item -LiteralPath $Transient -Recurse -Force
+        }
+    }
 
     Write-Host "[7/7] Creando accesos del usuario..."
     if (-not $NoShortcuts) {

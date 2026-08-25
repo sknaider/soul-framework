@@ -17,11 +17,21 @@ def test_uv_installer_is_version_pinned_and_hash_fail_closed() -> None:
     assert '$Version = "0.4.3"' in script
     assert "__PAYLOAD_SHA256__" not in script
     hashes = re.findall(r'\$\w+Sha256 = "([0-9a-f]{64})"', script)
-    assert len(hashes) == 2
+    assert len(hashes) == 3
     assert script.index('Assert-Hash $UvArchive') < script.index("Expand-Archive")
     assert script.index('Assert-Hash $PayloadArchive') < script.index("Expand-Archive")
     assert '$env:UV_PYTHON_NO_REGISTRY = "1"' in script
     assert "UV_PROJECT_ENVIRONMENT" in script
+    assert "soul.core.uv-owner.v1" in script
+    assert "Invoke-CheckedRetry" not in script
+    assert 'Assert-Hash $PythonArchive $PythonArchiveSha256 "Python de Astral"' in script
+    assert '"venv", $RuntimeDir, "--python", $BundledPython' in script
+    assert '"--offline", "--no-cache", "--no-index", "--find-links", $Wheelhouse' in script
+    assert '"--require-hashes", "--no-deps"' in script
+    assert '"pip", "check", "--python", $RuntimePython' in script
+    assert script.count('$ErrorActionPreference = "Continue"') == 1
+    assert script.count("$NativeExitCode = $LASTEXITCODE") == 1
+    assert "if ($NativeExitCode -ne 0)" in script
 
 
 def test_uv_runtime_project_and_lock_pin_soul_core() -> None:
