@@ -66,12 +66,33 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "official_trust_keys.json") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "templates") -Destination $Payload -Recurse
 
+# cmd.exe no interpreta de forma fiable un batch UTF-8 con saltos LF-only:
+# trunca comandos ("title" -> "le", "echo." -> "o.") y puede ocultar el
+# código real de salida. El payload debe contener launchers ASCII + CRLF aunque
+# el checkout o la copia haya normalizado los saltos de línea.
+$Ascii = [Text.ASCIIEncoding]::new()
+Get-ChildItem -LiteralPath $Payload -Filter "*.cmd" | ForEach-Object {
+    $LauncherText = [IO.File]::ReadAllText($_.FullName, [Text.UTF8Encoding]::new($false))
+    if ($LauncherText.ToCharArray() | Where-Object { [int]$_ -gt 127 } | Select-Object -First 1) {
+        throw "El launcher $($_.Name) debe ser ASCII para cmd.exe"
+    }
+    $LauncherText = ($LauncherText -replace "`r?`n", "`r`n").TrimEnd("`r", "`n") + "`r`n"
+    [IO.File]::WriteAllText($_.FullName, $LauncherText, $Ascii)
+}
+
 Write-Host "[5/6] Verificando el runtime antes de empaquetar..."
 & $RuntimePython (Join-Path $Payload "dependency_audit.py")
 & $RuntimePython -m pip check
 & $RuntimePython -m pip freeze --all | Set-Content -LiteralPath (Join-Path $Payload "DEPENDENCIES.txt") -Encoding UTF8
 & $RuntimePython -m soul_framework.cli --version
 & $RuntimePython (Join-Path $PSScriptRoot "setup_soul.py") --help | Out-Null
+Get-ChildItem -LiteralPath $Payload -Filter "*.cmd" | ForEach-Object {
+    $LauncherBytes = [IO.File]::ReadAllBytes($_.FullName)
+    $LauncherText = $Ascii.GetString($LauncherBytes)
+    if ($LauncherText -match "(?<!`r)`n" -or $LauncherText -notmatch "`r`n") {
+        throw "El launcher $($_.Name) no quedó normalizado a CRLF"
+    }
+}
 
 $Iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 7\ISCC.exe"
 if (-not (Test-Path -LiteralPath $Iscc)) {

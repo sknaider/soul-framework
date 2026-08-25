@@ -73,3 +73,30 @@ def test_windows_build_bundles_all_declared_extras():
     build_script = (HERE / "build.ps1").read_text(encoding="utf-8")
     assert '"$($CoreWheel.FullName)[all]"' in build_script
     assert "dependency_audit.py" in build_script
+
+
+def test_cmd_launchers_are_ascii_crlf():
+    launchers = sorted(HERE.glob("*.cmd"))
+    assert launchers
+    for launcher in launchers:
+        payload = launcher.read_bytes()
+        payload.decode("ascii")
+        assert b"\r\n" in payload
+        assert b"\n" not in payload.replace(b"\r\n", b"")
+
+
+def test_windows_build_normalizes_cmd_payload_by_bytes():
+    build_script = (HERE / "build.ps1").read_text(encoding="utf-8")
+    assert "ASCIIEncoding" in build_script
+    assert '($LauncherText -replace "`r?`n", "`r`n")' in build_script
+    assert "[IO.File]::WriteAllText($_.FullName, $LauncherText, $Ascii)" in build_script
+
+
+def test_cmd_launchers_are_ascii_with_windows_line_endings():
+    launchers = sorted(HERE.glob("*.cmd"))
+    assert launchers
+    for launcher in launchers:
+        payload = launcher.read_bytes()
+        payload.decode("ascii")
+        assert payload.endswith(b"\r\n"), launcher.name
+        assert b"\n" not in payload.replace(b"\r\n", b""), launcher.name
