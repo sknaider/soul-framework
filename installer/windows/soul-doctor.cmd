@@ -2,7 +2,7 @@
 setlocal
 chcp 65001 >nul
 set "PYTHONUTF8=1"
-title Diagnóstico - SOUL Core
+title Diagnostico - SOUL Core
 "%~dp0python.exe" "%~dp0doctor.py" %*
 set "SOUL_EXIT=%errorlevel%"
 echo.
