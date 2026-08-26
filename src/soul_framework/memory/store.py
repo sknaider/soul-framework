@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import struct
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -176,12 +177,13 @@ class MemoryStore:
             ids.append(int(row["id"]))
             vectors.append(vector)
 
-        # A freshly-created soul has no vectors. Native ANN libraries do not
-        # add value in that state, and some Windows/virtualized CPU builds can
-        # terminate the process while constructing an empty native index.
-        # Keep explicit ``usearch``/``hnsw`` requests unchanged; only ``auto``
-        # takes the portable exact path until canonical vectors exist.
-        if mode == "auto" and not ids:
+        # Native ANN libraries do not add value for an empty soul, and some
+        # Windows/virtualized CPU builds can terminate the process inside the
+        # native extension even after the first vector is added.  A process
+        # termination cannot be caught in Python, so Windows ``auto`` stays on
+        # the portable exact implementation. Explicit ``usearch``/``hnsw``
+        # requests remain available to users who control their target CPU.
+        if mode == "auto" and (not ids or sys.platform == "win32"):
             mode = "exact"
 
         index = create_vector_index(

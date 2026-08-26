@@ -6,6 +6,7 @@ import pytest
 
 from soul_framework import Soul
 from soul_framework.config import SoulConfig
+from soul_framework.memory import store as memory_store_module
 from soul_framework.memory.store import MemoryStore, _unpack_embedding
 from soul_framework.memory.vector_index import ExactVectorIndex, USearchMemoryIndex
 
@@ -48,6 +49,30 @@ async def test_auto_empty_soul_uses_portable_exact_index(tmp_path: Path):
         assert soul.memory._vector_index.count == 0
     finally:
         await soul.close()
+
+
+@pytest.mark.asyncio
+async def test_windows_auto_reopens_populated_soul_with_portable_exact_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(memory_store_module.sys, "platform", "win32")
+    db = tmp_path / "windows.db"
+    config = SoulConfig(
+        backend="sqlite",
+        backend_url=str(db),
+        memory_vector_index="auto",
+    )
+    soul = await Soul.create("zero", embedding=KeywordEmbedding(), config=config)
+    memory_id = await soul.memory.store("William es mi creador", importance=10)
+    await soul.close()
+
+    reopened = await Soul.create("zero", embedding=KeywordEmbedding(), config=config)
+    try:
+        assert isinstance(reopened.memory._vector_index, ExactVectorIndex)
+        hits = await reopened.memory.search("William creador", limit=1)
+        assert [hit.memory.id for hit in hits] == [memory_id]
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio
