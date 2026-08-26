@@ -7,7 +7,7 @@ import pytest
 from soul_framework import Soul
 from soul_framework.config import SoulConfig
 from soul_framework.memory.store import MemoryStore, _unpack_embedding
-from soul_framework.memory.vector_index import USearchMemoryIndex
+from soul_framework.memory.vector_index import ExactVectorIndex, USearchMemoryIndex
 
 
 class KeywordEmbedding:
@@ -32,6 +32,22 @@ def _config(db: Path) -> SoulConfig:
         memory_vector_index="usearch",
         memory_search_candidate_limit=10,
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_empty_soul_uses_portable_exact_index(tmp_path: Path):
+    db = tmp_path / "empty.db"
+    config = SoulConfig(
+        backend="sqlite",
+        backend_url=str(db),
+        memory_vector_index="auto",
+    )
+    soul = await Soul.create("ADA", embedding=KeywordEmbedding(), config=config)
+    try:
+        assert isinstance(soul.memory._vector_index, ExactVectorIndex)
+        assert soul.memory._vector_index.count == 0
+    finally:
+        await soul.close()
 
 
 @pytest.mark.asyncio

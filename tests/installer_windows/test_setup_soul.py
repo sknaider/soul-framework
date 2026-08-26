@@ -10,10 +10,16 @@ setup_soul = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(setup_soul)
 
 
-@pytest.mark.parametrize("name", ["asistente", "programador", "investigador", "compañero"])
+@pytest.mark.parametrize("name", ["asistente", "programador", "investigador", "companero"])
 def test_all_bundled_templates_verify(name):
     template = setup_soul.load_official_template(name)
     assert template["name"]
+
+
+def test_bundled_template_filenames_are_windows_portable():
+    names = [path.name for path in (HERE / "templates").glob("*.json")]
+    assert names
+    assert all(name.isascii() for name in names)
 
 
 def test_one_byte_tamper_is_rejected(tmp_path, monkeypatch):
