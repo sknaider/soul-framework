@@ -158,7 +158,11 @@ def _ask(prompt: str, default: str) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Configura un alma local de SOUL Core")
     parser.add_argument("--name", default="")
-    parser.add_argument("--template", choices=("asistente", "programador", "investigador", "compañero"), default="")
+    parser.add_argument(
+        "--template",
+        choices=("asistente", "programador", "investigador", "companero", "compañero"),
+        default="",
+    )
     parser.add_argument("--ollama-url", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--non-interactive", action="store_true")
@@ -177,9 +181,15 @@ def main(argv: list[str] | None = None) -> int:
         name = args.name or _ask("Nombre de tu alma", "Maya")
         print("\nPlantillas oficiales: 1) Asistente  2) Programador  3) Investigador  4) Compañero")
         selected = args.template or _ask("Elige 1, 2, 3 o 4", "1")
-        template_name = {"1": "asistente", "2": "programador", "3": "investigador", "4": "compañero"}.get(selected, selected.lower())
-        if template_name not in {"asistente", "programador", "investigador", "compañero"}:
+        template_name = {"1": "asistente", "2": "programador", "3": "investigador", "4": "companero"}.get(selected, selected.lower())
+        if template_name not in {"asistente", "programador", "investigador", "companero", "compañero"}:
             raise SetupError("selección de plantilla inválida")
+
+    # Keep the public Spanish spelling while using an ASCII-only artifact name.
+    # This avoids filename transcoding differences across Inno Setup, ZIP, Wine,
+    # legacy Windows code pages and copy tools.
+    if template_name == "compañero":
+        template_name = "companero"
 
     template = load_official_template(template_name)
     SOUL_DIR.mkdir(parents=True, exist_ok=True)

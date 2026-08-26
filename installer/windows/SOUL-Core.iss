@@ -64,3 +64,20 @@ begin
     MsgBox('El programa se quitará, pero tus almas y memorias en %USERPROFILE%\.soul se conservarán.', mbInformation, MB_OK);
   Result := True;
 end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  PythonExe: String;
+  Finalizer: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    ResultCode := -1;
+    PythonExe := ExpandConstant('{app}\python.exe');
+    Finalizer := ExpandConstant('{app}\finalize_install.py');
+    if (not Exec(PythonExe, '"' + Finalizer + '"', ExpandConstant('{app}'),
+      SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+      RaiseException(Format('La verificación final de dependencias falló (código %d). La instalación no es válida.', [ResultCode]));
+  end;
+end;

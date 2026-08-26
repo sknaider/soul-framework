@@ -38,8 +38,13 @@ REQUIRED_IMPORTS = (
 def main() -> int:
     failures: list[str] = []
     versions: dict[str, str] = {}
-    install_root = Path(__file__).resolve().parent.parent
-    ann_state_path = install_root / "ann-state.json"
+    app_dir = Path(__file__).resolve().parent
+    # The autonomous EXE installs app files directly in {app}; the uv design
+    # uses {install_root}/app. Accept both layouts, but never search outside
+    # these two explicit locations.
+    state_candidates = (app_dir / "ann-state.json", app_dir.parent / "ann-state.json")
+    ann_state_path = next((path for path in state_candidates if path.is_file()), state_candidates[0])
+    install_root = ann_state_path.parent
     ann_state: dict[str, object] = {}
     try:
         ann_state = json.loads(ann_state_path.read_text(encoding="utf-8-sig"))
