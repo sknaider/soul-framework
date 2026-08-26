@@ -15,6 +15,60 @@ $WheelDir = Join-Path $BuildRoot "wheels"
 $BuildVenv = Join-Path $BuildRoot "build-venv"
 $DistDir = Join-Path $RepoRoot "dist\windows"
 
+function Invoke-Checked([string]$Program, [string[]]$Arguments) {
+    $PreviousErrorAction = $ErrorActionPreference
+    $NativeExitCode = $null
+    try {
+        # Windows PowerShell 5.1 promotes native stderr to error records even
+        # when the process succeeds. Preserve output and trust the exit code.
+        $ErrorActionPreference = "Continue"
+        & $Program @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorAction
+    }
+    if ($null -eq $NativeExitCode -or $NativeExitCode -ne 0) {
+        throw "$Program termino con codigo $NativeExitCode"
+    }
+}
+
+function Install-AppLocalMsvcRuntime([string]$PythonHome) {
+    $SitePackages = Join-Path $PythonHome "Lib\site-packages"
+    $TorchLib = Join-Path $SitePackages "torch\lib"
+    $RuntimeFiles = @(
+        (Join-Path $PythonHome "vcruntime140.dll"),
+        (Join-Path $PythonHome "vcruntime140_1.dll"),
+        (Join-Path $SitePackages "sklearn\.libs\msvcp140.dll")
+    )
+    if (-not (Test-Path -LiteralPath $TorchLib -PathType Container)) {
+        throw "No se encontro el directorio nativo de Torch: $TorchLib"
+    }
+    foreach ($RuntimeFile in $RuntimeFiles) {
+        if (-not (Test-Path -LiteralPath $RuntimeFile -PathType Leaf)) {
+            throw "Falta una dependencia MSVC bloqueada: $RuntimeFile"
+        }
+        Copy-Item -LiteralPath $RuntimeFile -Destination $TorchLib -Force
+    }
+}
+
+function Remove-CoreBuildOriginMetadata([string]$PythonHome) {
+    # A wheel installed from the local build directory gets a direct_url.json
+    # containing C:\Users\<builder>\... . It is neither needed at runtime nor
+    # acceptable provenance for a redistributable payload.
+    $SitePackages = Join-Path $PythonHome "Lib\site-packages"
+    $CoreDistInfo = @(Get-ChildItem -LiteralPath $SitePackages -Directory -Filter "soul_framework-*.dist-info")
+    if ($CoreDistInfo.Count -ne 1) {
+        throw "Se esperaba exactamente un dist-info de SOUL Core; encontrados: $($CoreDistInfo.Count)"
+    }
+    $DirectUrl = Join-Path $CoreDistInfo[0].FullName "direct_url.json"
+    if (Test-Path -LiteralPath $DirectUrl -PathType Leaf) {
+        Remove-Item -LiteralPath $DirectUrl -Force
+    }
+    if (Test-Path -LiteralPath $DirectUrl) {
+        throw "No se pudo retirar metadata local del build: $DirectUrl"
+    }
+}
+
 if (Test-Path $BuildRoot) {
     Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
@@ -38,10 +92,10 @@ if ($Pth -notcontains 'Lib\site-packages') { $Pth += 'Lib\site-packages' }
 Set-Content -LiteralPath $PthFile.FullName -Value $Pth -Encoding Ascii
 
 Write-Host "[2/6] Preparando build aislado..."
-py -3.11 -m venv $BuildVenv
+Invoke-Checked "py" @("-3.11", "-m", "venv", $BuildVenv)
 $BuildPython = Join-Path $BuildVenv "Scripts\python.exe"
-& $BuildPython -m pip install --disable-pip-version-check --quiet --upgrade pip build
-& $BuildPython -m build --wheel --outdir $WheelDir $RepoRoot
+Invoke-Checked $BuildPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", "pip", "build")
+Invoke-Checked $BuildPython @("-m", "build", "--wheel", "--outdir", $WheelDir, $RepoRoot)
 $CoreWheel = Get-ChildItem -LiteralPath $WheelDir -Filter "soul_framework-*.whl" | Select-Object -First 1
 if (-not $CoreWheel) { throw "No se construyó el wheel de SOUL Core" }
 
@@ -49,14 +103,20 @@ Write-Host "[3/6] Instalando dependencias dentro del runtime privado..."
 $GetPip = Join-Path $DownloadDir "get-pip.py"
 Invoke-WebRequest -UseBasicParsing -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $GetPip
 $RuntimePython = Join-Path $Payload "python.exe"
-& $RuntimePython $GetPip --disable-pip-version-check --quiet
-& $RuntimePython -m pip install --disable-pip-version-check --no-cache-dir --quiet `
-    --target (Join-Path $Payload "Lib\site-packages") "$($CoreWheel.FullName)[all]"
+Invoke-Checked $RuntimePython @($GetPip, "--disable-pip-version-check", "--quiet")
+Invoke-Checked $RuntimePython @(
+    "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", "--quiet",
+    "--target", (Join-Path $Payload "Lib\site-packages"), "$($CoreWheel.FullName)[all]"
+)
+Install-AppLocalMsvcRuntime $Payload
+Remove-CoreBuildOriginMetadata $Payload
 
 Write-Host "[4/6] Incorporando onboarding, diagnósticos y plantillas firmadas..."
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "setup_soul.py") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "doctor.py") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "dependency_audit.py") -Destination $Payload
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "ann_probe.py") -Destination $Payload
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "finalize_install.py") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "soul.cmd") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "soul-setup.cmd") -Destination $Payload
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "soul-doctor.cmd") -Destination $Payload
@@ -81,11 +141,22 @@ Get-ChildItem -LiteralPath $Payload -Filter "*.cmd" | ForEach-Object {
 }
 
 Write-Host "[5/6] Verificando el runtime antes de empaquetar..."
-& $RuntimePython (Join-Path $Payload "dependency_audit.py")
-& $RuntimePython -m pip check
-& $RuntimePython -m pip freeze --all | Set-Content -LiteralPath (Join-Path $Payload "DEPENDENCIES.txt") -Encoding UTF8
-& $RuntimePython -m soul_framework.cli --version
-& $RuntimePython (Join-Path $PSScriptRoot "setup_soul.py") --help | Out-Null
+$BuildAnnState = [ordered]@{
+    schema = "soul.core.ann-state.v1"
+    probe_exit_code = 0
+    selected_engine = "usearch"
+    quarantine_path = ""
+    build_validation_only = $true
+}
+$BuildAnnState | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Payload "ann-state.json") -Encoding UTF8
+Invoke-Checked $RuntimePython @((Join-Path $Payload "dependency_audit.py"))
+Invoke-Checked $RuntimePython @("-m", "pip", "check")
+$FreezeOutput = & $RuntimePython -m pip list --format=freeze 2>&1
+$FreezeExitCode = $LASTEXITCODE
+if ($FreezeExitCode -ne 0) { throw "pip list termino con codigo $FreezeExitCode" }
+$FreezeOutput | Set-Content -LiteralPath (Join-Path $Payload "DEPENDENCIES.txt") -Encoding UTF8
+Invoke-Checked $RuntimePython @("-m", "soul_framework.cli", "--version")
+Invoke-Checked $RuntimePython @((Join-Path $PSScriptRoot "setup_soul.py"), "--help")
 Get-ChildItem -LiteralPath $Payload -Filter "*.cmd" | ForEach-Object {
     $LauncherBytes = [IO.File]::ReadAllBytes($_.FullName)
     $LauncherText = $Ascii.GetString($LauncherBytes)
@@ -119,7 +190,7 @@ if (-not (Test-Path -LiteralPath $Iscc)) {
 }
 
 Write-Host "[6/6] Compilando instalador EXE..."
-& $Iscc "/DMyAppVersion=$Version" (Join-Path $PSScriptRoot "SOUL-Core.iss")
+Invoke-Checked $Iscc @("/DMyAppVersion=$Version", (Join-Path $PSScriptRoot "SOUL-Core.iss"))
 $Installer = Join-Path $DistDir "SOUL-Core-$Version-Windows-x64.exe"
 if (-not (Test-Path -LiteralPath $Installer)) { throw "No apareció el instalador esperado: $Installer" }
 $Hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Installer

@@ -176,6 +176,14 @@ class MemoryStore:
             ids.append(int(row["id"]))
             vectors.append(vector)
 
+        # A freshly-created soul has no vectors. Native ANN libraries do not
+        # add value in that state, and some Windows/virtualized CPU builds can
+        # terminate the process while constructing an empty native index.
+        # Keep explicit ``usearch``/``hnsw`` requests unchanged; only ``auto``
+        # takes the portable exact path until canonical vectors exist.
+        if mode == "auto" and not ids:
+            mode = "exact"
+
         index = create_vector_index(
             self._emb.dimensions,
             engine=mode,
