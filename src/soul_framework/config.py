@@ -33,6 +33,14 @@ class SoulConfig:
     memory_search_default_limit: int = 10
     memory_search_candidate_limit: int = 100
     memory_vector_cache: bool = True  # cache embeddings in memory for SQLite search
+
+    # Sovereign identity. Persistent SOUL backends are fail-closed: the SIA
+    # credential and its pinned public trust store must be present and valid.
+    # Empty backend_url remains an explicitly ephemeral/in-memory test soul.
+    dni_credential_path: str = ""
+    dni_trust_store_path: str = ""
+    dni_trust_store_sha256: str = ""
+    machine_soul_id: str = ""
     memory_vector_index: str = "auto"  # auto | usearch | hnsw | exact | off
     memory_hnsw_m: int = 16
     memory_hnsw_ef_construction: int = 200
